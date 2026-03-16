@@ -45,7 +45,8 @@ cover/
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
-
+frontend/node_modules/
+pycache
 instance/
 .webassets-cache
 .scrapy
@@ -65,7 +66,7 @@ ipython_config.py
 .pdm-build/
 .env
 __pypackages__/
-
+node_modules/
 celerybeat-schedule
 celerybeat.pid
 
@@ -91,7 +92,7 @@ venv.bak/
 dmypy.json
 
 .pyre/
-
+frontend/.env.local
 .pytype/
 
 cython_debug/
