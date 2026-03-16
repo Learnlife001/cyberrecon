@@ -12,3 +12,4 @@ python-whois>=0.9.5,<1.0.0
 
 # Provides: `from Wappalyzer import Wappalyzer, WebPage`
 # Note: this package is older/unmaintained, but matches the repo's import.
+psycopg2-binary
