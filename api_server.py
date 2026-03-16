@@ -117,8 +117,8 @@ def scan(
     Start reconnaissance in the background and return a job id immediately.
     """
     domain = domain.strip()
-    if not domain:
-        raise HTTPException(status_code=400, detail="Domain must not be empty.")
+    if not domain or " " in domain or "." not in domain:
+        raise HTTPException(status_code=400, detail="Invalid domain format.")
 
     job_uuid = uuid.uuid4()
     job_id = str(job_uuid)
@@ -130,7 +130,6 @@ def scan(
     background_tasks.add_task(_run_scan_job, job_id, domain)
     return {"job_id": job_id, "status": "running"}
 
-
 @app.get("/results/{job_id}")
 def get_results(job_id: str):
     try:
@@ -140,11 +139,15 @@ def get_results(job_id: str):
 
     with SessionLocal() as db:
         scan = db.get(Scan, scan_uuid)
+
         if scan is None:
             raise HTTPException(status_code=404, detail="Job not found.")
 
-        if scan.status != "completed":
+        if scan.status == "running":
             return {"status": "running"}
+
+        if scan.status == "failed":
+            return {"status": "failed"}
 
         result_row = (
             db.query(ScanResult)
@@ -157,4 +160,3 @@ def get_results(job_id: str):
             return {"status": "completed", "data": None}
 
         return {"status": "completed", "data": result_row.results}
-
