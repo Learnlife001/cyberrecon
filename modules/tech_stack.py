@@ -1,19 +1,46 @@
-from Wappalyzer import Wappalyzer, WebPage
+import requests
 
 def run(domain):
-    print(f"\n[TECH STACK] Detecting technologies used by: {domain}")
-    
+    """
+    Detect technologies using HTTP headers and simple fingerprinting.
+    Returns a list of detected technologies.
+    """
+
+    technologies = []
+
     try:
         url = f"https://{domain}"
-        webpage = WebPage.new_from_url(url, timeout=10)
-        wappalyzer = Wappalyzer.latest()
-        technologies = wappalyzer.analyze(webpage)
+        response = requests.get(url, timeout=10)
 
-        if technologies:
-            print(" Technologies Detected:")
-            for tech in technologies:
-                print(f"  - {tech}")
-        else:
-            print("  [!] No technologies detected.")
-    except Exception as e:
-        print(f"  [ERROR] Failed to detect tech stack: {e}")
+        headers = response.headers
+
+        server = headers.get("Server", "")
+        powered = headers.get("X-Powered-By", "")
+
+        if server:
+            technologies.append(server)
+
+        if powered:
+            technologies.append(powered)
+
+        header_str = str(headers).lower()
+
+        if "cloudflare" in header_str:
+            technologies.append("Cloudflare")
+
+        if "nginx" in header_str:
+            technologies.append("Nginx")
+
+        if "apache" in header_str:
+            technologies.append("Apache")
+
+        if "php" in header_str:
+            technologies.append("PHP")
+
+        if "express" in header_str:
+            technologies.append("Express")
+
+    except Exception:
+        return []
+
+    return list(set(technologies))

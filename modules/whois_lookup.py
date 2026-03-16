@@ -1,16 +1,21 @@
 import whois
 
+
 def run(domain):
-    print(f"\n[WHOIS LOOKUP] Gathering WHOIS info for: {domain}")
-    
+    """
+    Return WHOIS information for the given domain as a dictionary.
+    On failure, returns {"error": "..."}.
+    """
     try:
         info = whois.whois(domain)
-        
-        print(f" Domain Name: {info.domain_name}")
-        print(f" Registrar: {info.registrar}")
-        print(f" Creation Date: {info.creation_date}")
-        print(f" Expiration Date: {info.expiration_date}")
-        print(f" Name Servers: {info.name_servers}")
-        print(f" Emails: {info.emails}")
+
+        return {
+            "domain_name": getattr(info, "domain_name", None),
+            "registrar": getattr(info, "registrar", None),
+            "creation_date": getattr(info, "creation_date", None),
+            "expiration_date": getattr(info, "expiration_date", None),
+            "name_servers": getattr(info, "name_servers", None),
+            "emails": getattr(info, "emails", None),
+        }
     except Exception as e:
-        print(f" [ERROR] WHOIS lookup failed: {e}")
+        return {"error": f"WHOIS lookup failed: {e}"}

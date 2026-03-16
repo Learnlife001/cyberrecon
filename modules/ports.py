@@ -1,24 +1,42 @@
 import nmap
 
-def run(domain):
-    print(f"\n[PORT SCANNER] Scanning common ports on {domain}...")
 
-    scanner = nmap.PortScanner()
+def run(domain):
+    """
+    Run an Nmap scan against the given domain.
+    """
+
+    results = []
 
     try:
-        # Scan top 1000 ports (default) for TCP only
+        scanner = nmap.PortScanner(
+            nmap_search_path=("C:/Program Files (x86)/Nmap/nmap.exe",)
+        )
+
         scanner.scan(domain, arguments="-T4")
 
         for host in scanner.all_hosts():
-            print(f" Host: {host}")
-            print(f" State: {scanner[host].state()}")
-            
+            host_state = scanner[host].state()
+
             for proto in scanner[host].all_protocols():
-                print(f" Protocol: {proto}")
                 ports = scanner[host][proto].keys()
+
                 for port in sorted(ports):
-                    state = scanner[host][proto][port]['state']
-                    name = scanner[host][proto][port]['name']
-                    print(f"  Port: {port} | State: {state} | Service: {name}")
+                    port_data = scanner[host][proto][port]
+
+                    results.append(
+                        {
+                            "host": host,
+                            "host_state": host_state,
+                            "protocol": proto,
+                            "port": int(port),
+                            "state": port_data.get("state"),
+                            "service": port_data.get("name"),
+                        }
+                    )
+
+        return results
+
     except Exception as e:
-        print(f" [ERROR] Nmap scan failed: {e}")
+        print("Nmap scan error:", e)
+        return []

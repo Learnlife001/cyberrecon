@@ -1,26 +1,8 @@
 CyberRecon
-Web Reconnaissance & Vulnerability Scanner
-
-CyberRecon is a modular Python-based web reconnaissance and vulnerability scanner designed for ethical hackers, bug bounty hunters, and cybersecurity researchers. It performs key reconnaissance tasks like DNS lookup, IP geolocation, subdomain enumeration, port scanning, WHOIS lookups, and technology stack detection, all from a single interface.
-
-Features
-
-DNS Record Enumeration (A, AAAA, MX, NS, TXT)
-Subdomain Enumeration (passive)
-IP Geolocation & ASN Info
-Port Scanning (TCP)
-WHOIS Lookup
-Tech Stack Detection (Wappalyzer)
-XSS Injection Testing (via Burp Suite)
-Burp Suite Proxy Integration (manual testing)
-Modular design for future vulnerability checks
-
-Roadmap
-Auto-scan for reflected XSS
-Basic SQLi test integration
-Local dashboard with Streamlit/Flask
-PDF report generation
-Authentication-aware scans
-
-Disclaimer
-CyberRecon is built for ethical hacking and research purposes only.
+CyberRecon is a web based reconnaissance platform built to automate the process of gathering intelligence about a domain. The application allows a user to enter a target domain and automatically collect important information such as DNS records IP information open ports subdomains WHOIS data and detected technologies. The goal of this project is to demonstrate how a modern reconnaissance tool can be built using Python for the scanning engine and a modern web framework for visualization.
+CyberRecon uses a modular architecture where each reconnaissance capability is implemented as an independent module. This allows the system to be extended easily by adding additional modules for vulnerability detection technology fingerprinting certificate analysis or threat intelligence enrichment. The backend is implemented using FastAPI which provides a high performance API layer responsible for starting scans managing background tasks and storing results. The frontend dashboard is built using Next.js and Tailwind CSS and provides an interface where users can start scans monitor progress and view results in a structured layout. Scan data is stored in a PostgreSQL database using Supabase which allows results to persist between sessions and enables future features such as scan history and analytics.
+When a user enters a domain into the dashboard the frontend sends a request to the FastAPI backend. The backend creates a scan job and runs the reconnaissance engine in the background. The engine normalizes the domain and sequentially runs multiple reconnaissance modules including DNS information collection IP intelligence retrieval subdomain discovery port scanning with Nmap WHOIS lookup and technology detection. Each module returns structured data which is combined into a unified result object. Once the scan is completed the result is stored in the PostgreSQL database and the frontend retrieves the data through the API and displays it in the dashboard.
+The DNS module collects DNS records including A AAAA MX NS and TXT records which provide insight into the domain infrastructure. The IP information module retrieves geographic location network ownership and autonomous system information for the target IP address. The subdomain discovery module attempts to identify additional subdomains associated with the target domain which can reveal additional attack surfaces. The port scanning module uses Nmap to detect open network ports and services which are commonly used during reconnaissance and penetration testing. The WHOIS module retrieves information about the domain registrar creation date expiration date and administrative contact emails. The technology detection module attempts to identify technologies used by the target web application.
+To run the project locally first clone the repository from GitHub and navigate into the project directory. Create a Python virtual environment and activate it so that project dependencies remain isolated from the global system environment. Install the backend dependencies using pip and ensure that Nmap is installed on the system since the port scanning module depends on it. After installing backend dependencies navigate to the frontend directory and install Node dependencies using npm. Create an environment file in the project root and configure the database connection string so that the backend can connect to the PostgreSQL database. Once configuration is complete start the backend API server using uvicorn and then start the Next.js frontend development server. The dashboard will then be accessible in the browser where a domain can be entered to begin reconnaissance.
+CyberRecon is intended for educational purposes security research and authorized penetration testing. Users should ensure they have permission before scanning any target system or domain. Unauthorized scanning of systems may violate laws or service agreements and should always be avoided.
+This project demonstrates how modern cybersecurity tools can be built by combining a Python reconnaissance engine a high performance API framework and a modern web interface. Future improvements may include adding additional reconnaissance modules implementing vulnerability scanning integrating certificate transparency logs expanding subdomain enumeration adding authentication and user accounts and improving the dashboard with analytics and visualization features.
