@@ -38,7 +38,7 @@ type ReconResult = {
 };
 
 const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL || "https://cyberrecon-jfiu.onrender.com";
+  process.env.NEXT_PUBLIC_API_URL || "https://cyberrecon-jriu.onrender.com";
 
 export default function Page() {
   const [domain, setDomain] = useState("");
