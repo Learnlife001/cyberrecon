@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useState } from "react";
 
 type ReconResult = {
   domain: string;
@@ -37,26 +37,43 @@ type ReconResult = {
   [key: string]: unknown;
 };
 
-type JobStatus =
-  | { status: "running" }
-  | { status: "completed"; data: ReconResult };
-
-const POLL_MS = 3000;
+const API_BASE = "https://cyberrecon-jfiu.onrender.com";
 
 export default function Page() {
   const [domain, setDomain] = useState("");
   const [jobId, setJobId] = useState<string | null>(null);
-  const [status, setStatus] = useState<"idle" | "running" | "completed" | "error">(
-    "idle",
-  );
+  const [status, setStatus] = useState<
+    "idle" | "running" | "completed" | "failed" | "error"
+  >("idle");
   const [result, setResult] = useState<ReconResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const apiBase = useMemo(() => {
-    return process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ?? "";
-  }, []);
+  const pollResults = async (id: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/results/${id}`);
+      const data = (await res.json()) as {
+        status: string;
+        data?: ReconResult;
+      };
 
-  const pollTimer = useRef<number | null>(null);
+      if (data.status === "completed") {
+        setResult(data.data ?? null);
+        setStatus("completed");
+        return;
+      }
+
+      if (data.status === "running") {
+        setTimeout(() => pollResults(id), 3000);
+      }
+
+      if (data.status === "failed") {
+        setStatus("failed");
+      }
+    } catch (e) {
+      setStatus("error");
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   async function startScan() {
     const trimmed = domain.trim();
@@ -68,83 +85,28 @@ export default function Page() {
     setJobId(null);
 
     try {
-      const resp = await fetch(
-        `${apiBase}/scan?domain=${encodeURIComponent(trimmed)}`,
-        { method: "POST" },
-      );
+      const res = await fetch(`${API_BASE}/scan`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ domain: trimmed }),
+      });
 
-      if (!resp.ok) {
-        const text = await resp.text();
-        throw new Error(text || `Request failed (${resp.status})`);
+      const job = (await res.json()) as { job_id?: string; status?: string };
+      const jobIdFromApi = job.job_id;
+
+      if (!jobIdFromApi) {
+        throw new Error("Missing job_id in response.");
       }
 
-      const data = (await resp.json()) as { job_id?: string; status?: string };
-      if (!data.job_id) throw new Error("Missing job_id in response.");
-
-      setJobId(data.job_id);
+      setJobId(jobIdFromApi);
+      pollResults(jobIdFromApi);
     } catch (e) {
       setStatus("error");
       setError(e instanceof Error ? e.message : String(e));
     }
   }
-
-  const poll = useCallback(
-    async (job_id: string) => {
-      try {
-        const resp = await fetch(
-          `${apiBase}/results/${encodeURIComponent(job_id)}`,
-        );
-        if (!resp.ok) {
-          const text = await resp.text();
-          throw new Error(text || `Polling failed (${resp.status})`);
-        }
-
-        const payload = (await resp.json()) as JobStatus;
-
-        if (payload.status === "completed") {
-          setStatus("completed");
-          setResult(payload.data);
-          return true;
-        }
-
-        setStatus("running");
-        return false;
-      } catch (e) {
-        setStatus("error");
-        setError(e instanceof Error ? e.message : String(e));
-        return true;
-      }
-    },
-    [apiBase],
-  );
-
-  useEffect(() => {
-    async function tick() {
-      if (!jobId) return;
-      const done = await poll(jobId);
-      if (done && pollTimer.current) {
-        window.clearInterval(pollTimer.current);
-        pollTimer.current = null;
-      }
-    }
-
-    if (pollTimer.current) {
-      window.clearInterval(pollTimer.current);
-      pollTimer.current = null;
-    }
-
-    if (jobId) {
-      tick();
-      pollTimer.current = window.setInterval(tick, POLL_MS);
-    }
-
-    return () => {
-      if (pollTimer.current) {
-        window.clearInterval(pollTimer.current);
-        pollTimer.current = null;
-      }
-    };
-  }, [jobId, poll]);
 
   const dns = result?.dns ?? {};
   const ip = result?.ip_info ?? {};
