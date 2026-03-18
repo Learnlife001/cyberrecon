@@ -6,6 +6,7 @@ import json
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from sqlalchemy import DateTime, ForeignKey, String, create_engine, func
@@ -16,6 +17,14 @@ from main import run_recon
 
 
 app = FastAPI(title="CyberRecon API", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("cyberrecon")
@@ -34,16 +43,6 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 class Base(DeclarativeBase):
     pass
-
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 
 class Scan(Base):
     __tablename__ = "scans"
@@ -232,3 +231,8 @@ def get_results(job_id: str):
             "status": "completed",
             "data": result_row.results
         }
+
+
+@app.options("/{full_path:path}")
+def preflight_handler(full_path: str):
+    return JSONResponse(content={"message": "OK"})
