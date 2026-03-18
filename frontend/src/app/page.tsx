@@ -37,7 +37,8 @@ type ReconResult = {
   [key: string]: unknown;
 };
 
-const API_BASE = "https://cyberrecon-jfiu.onrender.com";
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_URL || "https://cyberrecon-jfiu.onrender.com";
 
 export default function Page() {
   const [domain, setDomain] = useState("");
@@ -84,7 +85,10 @@ export default function Page() {
     setStatus("running");
     setJobId(null);
 
-    try {
+    console.log("API_BASE:", API_BASE);
+    console.log("Sending request to:", `${API_BASE}/scan`);
+
+    const attempt = async () => {
       const res = await fetch(`${API_BASE}/scan`, {
         method: "POST",
         headers: {
@@ -92,6 +96,10 @@ export default function Page() {
         },
         body: JSON.stringify({ domain: trimmed }),
       });
+
+      if (!res.ok) {
+        throw new Error(`Server responded with ${res.status}`);
+      }
 
       const job = (await res.json()) as { job_id?: string; status?: string };
       const jobIdFromApi = job.job_id;
@@ -102,9 +110,21 @@ export default function Page() {
 
       setJobId(jobIdFromApi);
       pollResults(jobIdFromApi);
-    } catch (e) {
-      setStatus("error");
-      setError(e instanceof Error ? e.message : String(e));
+    };
+
+    try {
+      await attempt();
+    } catch (err) {
+      console.error("Scan request failed, retrying once...", err);
+      try {
+        await attempt();
+      } catch (err2) {
+        console.error("Scan request failed after retry:", err2);
+        setStatus("error");
+        setError(
+          "Scan request failed. The backend may be starting up. Please try again in a few seconds.",
+        );
+      }
     }
   }
 

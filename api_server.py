@@ -4,7 +4,7 @@ import logging
 import traceback
 import json
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -95,11 +95,6 @@ class ScanResult(Base):
 
 Base.metadata.create_all(bind=engine)
 
-
-class ScanRequest(BaseModel):
-    domain: str
-
-
 @app.get("/")
 def root():
     return {"service": "CyberRecon API is running"}
@@ -148,11 +143,13 @@ def _run_scan_job(job_id: str, domain: str):
 
         db.commit()
 
+class ScanRequest(BaseModel):
+    domain: str
 
 @app.post("/scan")
-def scan(req: ScanRequest, background_tasks: BackgroundTasks):
+def scan(request: ScanRequest, background_tasks: BackgroundTasks):
 
-    domain = req.domain.strip()
+    domain = request.domain.strip()
 
     if not domain or " " in domain or "." not in domain:
         raise HTTPException(
