@@ -233,6 +233,27 @@ def get_results(job_id: str):
         }
 
 
+@app.get("/scans")
+def list_scans():
+    with SessionLocal() as db:
+        scans = (
+            db.query(Scan)
+            .order_by(Scan.created_at.desc())
+            .limit(20)
+            .all()
+        )
+
+        return [
+            {
+                "job_id": str(s.id),
+                "domain": s.domain,
+                "status": s.status,
+                "created_at": s.created_at,
+            }
+            for s in scans
+        ]
+
+
 @app.options("/{full_path:path}")
 def preflight_handler(full_path: str):
     return JSONResponse(content={"message": "OK"})

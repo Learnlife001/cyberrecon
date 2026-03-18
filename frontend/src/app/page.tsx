@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 type ReconResult = {
   domain: string;
@@ -37,8 +37,18 @@ type ReconResult = {
   [key: string]: unknown;
 };
 
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL || "https://cyberrecon-jriu.onrender.com";
+const raw = process.env.NEXT_PUBLIC_API_URL;
+if (!raw) {
+  throw new Error("NEXT_PUBLIC_API_URL is not defined");
+}
+const API_BASE = raw.replace(/\/$/, "");
+
+type ScanHistoryItem = {
+  jobId: string;
+  domain: string;
+  createdAt: string;
+  status?: string;
+};
 
 export default function Page() {
   const [domain, setDomain] = useState("");
@@ -48,6 +58,65 @@ export default function Page() {
   >("idle");
   const [result, setResult] = useState<ReconResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [history, setHistory] = useState<ScanHistoryItem[]>([]);
+
+  async function fetchHistoryFromAPI() {
+    try {
+      const res = await fetch(`${API_BASE}/scans`);
+      const data = await res.json();
+      if (!Array.isArray(data)) return;
+
+      const formatted = data.map((item: any) => ({
+        jobId: String(item.job_id),
+        domain: String(item.domain),
+        createdAt: item.created_at ? String(item.created_at) : new Date().toISOString(),
+        status: item.status ? String(item.status) : undefined,
+      }));
+
+      setHistory(formatted.slice(0, 20));
+    } catch {
+      // Optional upgrade: ignore backend history errors.
+    }
+  }
+
+  useEffect(() => {
+    // Load local scan history immediately.
+    try {
+      const data = JSON.parse(
+        localStorage.getItem("scan_history") || "[]",
+      ) as ScanHistoryItem[];
+      if (Array.isArray(data)) setHistory(data);
+    } catch {
+      // Ignore malformed localStorage.
+    }
+
+    // Optional upgrade: refresh history from backend.
+    void fetchHistoryFromAPI();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function saveToHistory(jobIdToSave: string, domainToSave: string) {
+    const existing = (() => {
+      try {
+        return JSON.parse(localStorage.getItem("scan_history") || "[]") as ScanHistoryItem[];
+      } catch {
+        return [];
+      }
+    })();
+
+    const updated = [
+      {
+        jobId: jobIdToSave,
+        domain: domainToSave,
+        createdAt: new Date().toISOString(),
+        status: "running",
+      },
+      ...existing,
+    ].slice(0, 20);
+
+    localStorage.setItem("scan_history", JSON.stringify(updated));
+    setHistory(updated);
+  }
 
   const pollResults = async (id: string) => {
     try {
@@ -109,6 +178,7 @@ export default function Page() {
       }
 
       setJobId(jobIdFromApi);
+      saveToHistory(jobIdFromApi, trimmed);
       pollResults(jobIdFromApi);
     };
 
@@ -126,6 +196,14 @@ export default function Page() {
         );
       }
     }
+  }
+
+  function loadScan(pastJobId: string) {
+    setError(null);
+    setResult(null);
+    setStatus("running");
+    setJobId(pastJobId);
+    pollResults(pastJobId);
   }
 
   const dns = result?.dns ?? {};
@@ -156,9 +234,41 @@ export default function Page() {
           </button>
         </div>
 
+        <div className="mt-6 p-4 border rounded-xl bg-white">
+          <h2 className="font-bold text-lg mb-2">Recent Scans</h2>
+
+          {history.length === 0 ? (
+            <p>No scans yet</p>
+          ) : (
+            <div className="space-y-2">
+              {history.map((item) => (
+                <button
+                  key={item.jobId}
+                  type="button"
+                  onClick={() => loadScan(item.jobId)}
+                  className="w-full text-left border rounded-lg p-2 bg-slate-50 hover:bg-slate-100"
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="font-medium truncate">{item.domain}</div>
+                      <div className="text-xs text-slate-600">
+                        {item.status || "stored"}
+                      </div>
+                    </div>
+                    <div className="text-xs text-slate-500 whitespace-nowrap">
+                      {new Date(item.createdAt).toLocaleString()}
+                    </div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
         <div className="mt-4 flex flex-wrap items-center gap-3 text-sm text-slate-700">
           <span>
-            <span className="font-semibold">Status:</span> {status}
+            <span className="font-semibold">Status:</span>{" "}
+            {status === "running" ? "Scanning..." : status}
           </span>
           {jobId && (
             <span className="text-xs bg-slate-200 rounded-full px-3 py-1">
