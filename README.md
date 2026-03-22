@@ -6,3 +6,9 @@ The DNS module collects DNS records including A AAAA MX NS and TXT records which
 To run the project locally first clone the repository from GitHub and navigate into the project directory. Create a Python virtual environment and activate it so that project dependencies remain isolated from the global system environment. Install the backend dependencies using pip and ensure that Nmap is installed on the system since the port scanning module depends on it. After installing backend dependencies navigate to the frontend directory and install Node dependencies using npm. Create an environment file in the project root and configure the database connection string so that the backend can connect to the PostgreSQL database. Once configuration is complete start the backend API server using uvicorn and then start the Next.js frontend development server. The dashboard will then be accessible in the browser where a domain can be entered to begin reconnaissance.
 CyberRecon is intended for educational purposes security research and authorized penetration testing. Users should ensure they have permission before scanning any target system or domain. Unauthorized scanning of systems may violate laws or service agreements and should always be avoided.
 This project demonstrates how modern cybersecurity tools can be built by combining a Python reconnaissance engine a high performance API framework and a modern web interface. Future improvements may include adding additional reconnaissance modules implementing vulnerability scanning integrating certificate transparency logs expanding subdomain enumeration adding authentication and user accounts and improving the dashboard with analytics and visualization features.
+
+Author
+Chigozie Okuma
+GitHub: https://github.com/Learnlife001
+LinkedIn: https://www.linkedin.com/in/cjokuma23/
+Portfolio: https://learnlife-portfolio.vercel.app/
