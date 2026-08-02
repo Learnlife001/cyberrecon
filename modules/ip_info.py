@@ -1,3 +1,4 @@
+import os
 import requests
 import socket
 
@@ -9,7 +10,14 @@ def run(domain):
     """
     try:
         ip = socket.gethostbyname(domain)
-        response = requests.get(f"https://ipinfo.io/{ip}/json")
+        url = f"https://ipinfo.io/{ip}/json"
+        headers = {}
+        api_key = os.getenv("IPINFO_API_KEY")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
         data = response.json()
 
         return {

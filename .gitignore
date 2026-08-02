@@ -40,6 +40,7 @@ frontend/.next/
 
 # Environment variables
 frontend/.env.local
+config/*.txt
 
 # Coverage
 .coverage

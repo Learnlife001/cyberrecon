@@ -1,47 +1,21 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type ReconResult = {
   domain: string;
-  dns?: {
-    A?: string[];
-    AAAA?: string[];
-    MX?: { exchange: string; priority: number }[];
-    [key: string]: unknown;
-  };
-  ip_info?: {
-    ip?: string;
-    org?: string;
-    city?: string;
-    country?: string;
-    [key: string]: unknown;
-  };
+  dns?: { A?: string[]; AAAA?: string[]; MX?: { exchange: string; priority: number }[] };
+  ip_info?: { ip?: string; org?: string; city?: string; country?: string; region?: string };
   subdomains?: string[];
-  ports?: {
-    host?: string;
-    host_state?: string;
-    protocol?: string;
-    port?: number;
-    state?: string;
-    service?: string;
-  }[];
+  ports?: { host?: string; protocol?: string; port?: number; state?: string; service?: string }[];
   whois?: {
     registrar?: string;
     creation_date?: string | string[] | null;
     expiration_date?: string | string[] | null;
     emails?: string | string[] | null;
-    [key: string]: unknown;
   };
   technologies?: string[];
-  [key: string]: unknown;
 };
-
-const raw = process.env.NEXT_PUBLIC_API_URL;
-if (!raw) {
-  throw new Error("NEXT_PUBLIC_API_URL is not defined");
-}
-const API_BASE = raw.replace(/\/$/, "");
 
 type ScanHistoryItem = {
   jobId: string;
@@ -50,52 +24,66 @@ type ScanHistoryItem = {
   status?: string;
 };
 
+type ApiScanHistoryItem = {
+  job_id: unknown;
+  domain: unknown;
+  created_at?: unknown;
+  status?: unknown;
+};
+
+const raw = process.env.NEXT_PUBLIC_API_URL;
+if (!raw) throw new Error("NEXT_PUBLIC_API_URL is not defined");
+const API_BASE = raw.replace(/\/$/, "");
+
+const Dash = () => <span aria-hidden="true">—</span>;
+
 export default function Page() {
   const [domain, setDomain] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [showSettings, setShowSettings] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
-  const [status, setStatus] = useState<
-    "idle" | "running" | "completed" | "failed" | "error"
-  >("idle");
+  const [status, setStatus] = useState<"idle" | "queued" | "running" | "completed" | "failed" | "error">("idle");
   const [result, setResult] = useState<ReconResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [history, setHistory] = useState<ScanHistoryItem[]>([]);
-
-  async function fetchHistoryFromAPI() {
+  const [history, setHistory] = useState<ScanHistoryItem[]>(() => {
     try {
-      const res = await fetch(`${API_BASE}/scans`);
-      const data = await res.json();
-      if (!Array.isArray(data)) return;
+      const stored = JSON.parse(localStorage.getItem("scan_history") || "[]") as unknown;
+      return Array.isArray(stored) ? (stored as ScanHistoryItem[]) : [];
+    } catch {
+      return [];
+    }
+  });
+  const activePoll = useRef<AbortController | null>(null);
 
-      const formatted = data.map((item: any) => ({
+  useEffect(() => () => activePoll.current?.abort(), []);
+
+  async function fetchHistoryFromAPI(key: string) {
+    try {
+      const res = await fetch(`${API_BASE}/scans`, { headers: { "X-API-Key": key } });
+      if (!res.ok) throw new Error(`History request failed with ${res.status}`);
+      const data = (await res.json()) as unknown;
+      if (!Array.isArray(data)) return;
+      const formatted = (data as ApiScanHistoryItem[]).map((item) => ({
         jobId: String(item.job_id),
         domain: String(item.domain),
         createdAt: item.created_at ? String(item.created_at) : new Date().toISOString(),
         status: item.status ? String(item.status) : undefined,
       }));
-
       setHistory(formatted.slice(0, 20));
-    } catch {
-      // Optional upgrade: ignore backend history errors.
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     }
   }
 
-  useEffect(() => {
-    // Load local scan history immediately.
-    try {
-      const data = JSON.parse(
-        localStorage.getItem("scan_history") || "[]",
-      ) as ScanHistoryItem[];
-      if (Array.isArray(data)) setHistory(data);
-    } catch {
-      // Ignore malformed localStorage.
-    }
+  async function connect() {
+    const key = apiKey.trim();
+    if (!key) return;
+    setError(null);
+    await fetchHistoryFromAPI(key);
+    setShowSettings(false);
+  }
 
-    // Optional upgrade: refresh history from backend.
-    void fetchHistoryFromAPI();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  function saveToHistory(jobIdToSave: string, domainToSave: string) {
+  function saveToHistory(id: string, target: string, nextStatus = "running") {
     const existing = (() => {
       try {
         return JSON.parse(localStorage.getItem("scan_history") || "[]") as ScanHistoryItem[];
@@ -103,107 +91,104 @@ export default function Page() {
         return [];
       }
     })();
-
     const updated = [
-      {
-        jobId: jobIdToSave,
-        domain: domainToSave,
-        createdAt: new Date().toISOString(),
-        status: "running",
-      },
-      ...existing,
+      { jobId: id, domain: target, createdAt: new Date().toISOString(), status: nextStatus },
+      ...existing.filter((item) => item.jobId !== id),
     ].slice(0, 20);
-
     localStorage.setItem("scan_history", JSON.stringify(updated));
     setHistory(updated);
   }
 
-  const pollResults = async (id: string) => {
+  function updateHistoryStatus(id: string, nextStatus: string) {
+    const updated = history.map((item) => item.jobId === id ? { ...item, status: nextStatus } : item);
+    localStorage.setItem("scan_history", JSON.stringify(updated));
+    setHistory(updated);
+  }
+
+  async function pollResults(id: string, key: string) {
+    activePoll.current?.abort();
+    const controller = new AbortController();
+    activePoll.current = controller;
     try {
-      const res = await fetch(`${API_BASE}/results/${id}`);
-      const data = (await res.json()) as {
-        status: string;
-        data?: ReconResult;
-      };
-
-      if (data.status === "completed") {
-        setResult(data.data ?? null);
-        setStatus("completed");
-        return;
-      }
-
-      if (data.status === "running") {
-        setTimeout(() => pollResults(id), 3000);
-      }
-
-      if (data.status === "failed") {
-        setStatus("failed");
+      while (!controller.signal.aborted) {
+        const res = await fetch(`${API_BASE}/results/${id}`, {
+          headers: { "X-API-Key": key },
+          signal: controller.signal,
+        });
+        if (!res.ok) throw new Error(`Results request failed with ${res.status}`);
+        const data = (await res.json()) as { status: string; data?: ReconResult };
+        if (data.status === "completed") {
+          setResult(data.data ?? null);
+          setStatus("completed");
+          updateHistoryStatus(id, "completed");
+          return;
+        }
+        if (data.status === "failed") {
+          setStatus("failed");
+          updateHistoryStatus(id, "failed");
+          return;
+        }
+        if (data.status !== "queued" && data.status !== "running") throw new Error("Unexpected scan status returned by backend");
+        setStatus(data.status);
+        updateHistoryStatus(id, data.status);
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 3000));
       }
     } catch (e) {
+      if (controller.signal.aborted) return;
       setStatus("error");
       setError(e instanceof Error ? e.message : String(e));
     }
-  };
+  }
 
   async function startScan() {
-    const trimmed = domain.trim();
-    if (!trimmed) return;
-
+    const target = domain.trim();
+    const key = apiKey.trim();
+    if (!key) {
+      setShowSettings(true);
+      setError("Add your scan API key to continue.");
+      return;
+    }
+    if (!target) return;
     setError(null);
     setResult(null);
     setStatus("running");
     setJobId(null);
-
-    console.log("API_BASE:", API_BASE);
-    console.log("Sending request to:", `${API_BASE}/scan`);
-
-    const attempt = async () => {
+    try {
       const res = await fetch(`${API_BASE}/scan`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ domain: trimmed }),
+        headers: { "Content-Type": "application/json", "X-API-Key": key },
+        body: JSON.stringify({ domain: target }),
       });
-
       if (!res.ok) {
-        throw new Error(`Server responded with ${res.status}`);
+        const payload = await res.json().catch(() => null) as { detail?: string } | null;
+        throw new Error(payload?.detail || `Scan request failed with ${res.status}`);
       }
-
-      const job = (await res.json()) as { job_id?: string; status?: string };
-      const jobIdFromApi = job.job_id;
-
-      if (!jobIdFromApi) {
-        throw new Error("Missing job_id in response.");
-      }
-
-      setJobId(jobIdFromApi);
-      saveToHistory(jobIdFromApi, trimmed);
-      pollResults(jobIdFromApi);
-    };
-
-    try {
-      await attempt();
-    } catch (err) {
-      console.error("Scan request failed, retrying once...", err);
-      try {
-        await attempt();
-      } catch (err2) {
-        console.error("Scan request failed after retry:", err2);
-        setStatus("error");
-        setError(
-          "Scan request failed. The backend may be starting up. Please try again in a few seconds.",
-        );
-      }
+      const job = (await res.json()) as { job_id?: string; status?: "queued" | "running" };
+      if (!job.job_id) throw new Error("Backend response did not include a job ID");
+      const initialStatus = job.status === "queued" ? "queued" : "running";
+      setStatus(initialStatus);
+      setJobId(job.job_id);
+      saveToHistory(job.job_id, target, initialStatus);
+      void pollResults(job.job_id, key);
+    } catch (e) {
+      setStatus("error");
+      setError(e instanceof Error ? e.message : String(e));
     }
   }
 
-  function loadScan(pastJobId: string) {
-    setError(null);
+  function loadScan(item: ScanHistoryItem) {
+    const key = apiKey.trim();
+    if (!key) {
+      setShowSettings(true);
+      setError("Add your scan API key to load stored results.");
+      return;
+    }
+    setDomain(item.domain);
+    setJobId(item.jobId);
     setResult(null);
+    setError(null);
     setStatus("running");
-    setJobId(pastJobId);
-    pollResults(pastJobId);
+    void pollResults(item.jobId, key);
   }
 
   const dns = result?.dns ?? {};
@@ -212,254 +197,147 @@ export default function Page() {
   const whois = result?.whois ?? {};
   const subdomains = result?.subdomains ?? [];
   const technologies = result?.technologies ?? [];
+  const finished = history.filter((item) => item.status === "completed").length;
+  const active = history.filter((item) => item.status === "queued" || item.status === "running").length;
+  const activeScan = status === "queued" || status === "running";
+  const dateValue = (value?: string | string[] | null) => Array.isArray(value) ? value[0] : value;
 
   return (
-    <main className="min-h-screen px-4 py-6 md:px-8 lg:px-12">
-      <div className="max-w-6xl mx-auto">
-        <h1 className="text-2xl font-bold mb-4">CyberRecon Dashboard</h1>
-
-        <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center">
-          <input
-            value={domain}
-            onChange={(e) => setDomain(e.target.value)}
-            placeholder="example.com"
-            className="flex-1 rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 bg-white"
-          />
-          <button
-            onClick={startScan}
-            disabled={!domain.trim() || status === "running"}
-            className="inline-flex items-center justify-center rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            Start Scan
-          </button>
+    <main className="app-shell">
+      <header className="topbar">
+        <a className="brand" href="#top" aria-label="CyberRecon home">
+          <span className="brand-mark">CR</span>
+          <span><strong>CyberRecon</strong><small>Threat Intelligence Console</small></span>
+        </a>
+        <nav className="topnav" aria-label="Primary navigation">
+          <a className="active" href="#overview">Overview</a>
+          <a href="#history">Scan history</a>
+          <a href="#results">Intelligence</a>
+        </nav>
+        <div className="top-actions">
+          <span className="system-pill"><i /> API online</span>
+          <button className="icon-button" onClick={() => setShowSettings((value) => !value)} aria-label="API settings">⚙</button>
         </div>
+      </header>
 
-        <div className="mt-6 p-4 border rounded-xl bg-white">
-          <h2 className="font-bold text-lg mb-2">Recent Scans</h2>
+      {showSettings && (
+        <aside className="settings-panel" aria-label="API settings">
+          <div><span className="eyebrow">Secure access</span><h2>API connection</h2></div>
+          <button className="close-button" onClick={() => setShowSettings(false)} aria-label="Close settings">×</button>
+          <p>The key stays in this browser tab and is never compiled into the application.</p>
+          <label htmlFor="api-key">Scan API key</label>
+          <input id="api-key" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="Enter access key" autoComplete="off" />
+          <button className="primary-button full" onClick={connect} disabled={!apiKey.trim()}>Connect & load history</button>
+        </aside>
+      )}
 
-          {history.length === 0 ? (
-            <p>No scans yet</p>
-          ) : (
-            <div className="space-y-2">
-              {history.map((item) => (
-                <button
-                  key={item.jobId}
-                  type="button"
-                  onClick={() => loadScan(item.jobId)}
-                  className="w-full text-left border rounded-lg p-2 bg-slate-50 hover:bg-slate-100"
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="font-medium truncate">{item.domain}</div>
-                      <div className="text-xs text-slate-600">
-                        {item.status || "stored"}
-                      </div>
-                    </div>
-                    <div className="text-xs text-slate-500 whitespace-nowrap">
-                      {new Date(item.createdAt).toLocaleString()}
-                    </div>
-                  </div>
-                </button>
-              ))}
-            </div>
-          )}
+      <section className="hero" id="top">
+        <div>
+          <span className="eyebrow">Reconnaissance workspace</span>
+          <h1>Map your external attack surface.</h1>
+          <p>Run passive intelligence and targeted service discovery from one operational view.</p>
         </div>
+        <div className="hero-signal"><span className="radar"><i /></span><div><strong>{activeScan ? (status === "queued" ? "Scan queued" : "Scan in progress") : "System ready"}</strong><small>{activeScan ? domain : "Awaiting target"}</small></div></div>
+      </section>
 
-        <div className="mt-4 flex flex-wrap items-center gap-3 text-sm text-slate-700">
-          <span>
-            <span className="font-semibold">Status:</span>{" "}
-            {status === "running" ? "Scanning..." : status}
-          </span>
-          {jobId && (
-            <span className="text-xs bg-slate-200 rounded-full px-3 py-1">
-              job_id: <code>{jobId}</code>
-            </span>
-          )}
+      <section className="command-card" id="overview">
+        <div className="command-label"><span>01</span><div><strong>Launch reconnaissance</strong><small>Enter an authorized public domain</small></div></div>
+        <div className="target-input">
+          <span>⌖</span>
+          <input value={domain} onChange={(e) => setDomain(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void startScan(); }} placeholder="example.com" aria-label="Target domain" />
         </div>
+        <button className="primary-button" onClick={startScan} disabled={!domain.trim() || activeScan}>
+          {activeScan ? <><span className="spinner" /> {status === "queued" ? "Queued" : "Scanning"}</> : <>Start scan <span>→</span></>}
+        </button>
+      </section>
 
-        {error && (
-          <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
-            {error}
+      {error && <div className="alert"><strong>Request interrupted</strong><span>{error}</span><button onClick={() => setError(null)}>×</button></div>}
+
+      <section className="metrics-grid">
+        <article><span className="metric-icon violet">◎</span><div><small>Total scans</small><strong>{history.length.toString().padStart(2, "0")}</strong><em>Last 20 retained</em></div></article>
+        <article><span className="metric-icon green">✓</span><div><small>Completed</small><strong>{finished.toString().padStart(2, "0")}</strong><em>Results available</em></div></article>
+        <article><span className="metric-icon cyan">↻</span><div><small>Active jobs</small><strong>{active.toString().padStart(2, "0")}</strong><em>Polling every 3 sec</em></div></article>
+        <article><span className="metric-icon amber">◈</span><div><small>Assets found</small><strong>{result ? subdomains.length + ports.length : 0}</strong><em>Current target</em></div></article>
+      </section>
+
+      <div className="workspace-grid">
+        <aside className="history-panel" id="history">
+          <div className="section-heading"><div><span className="eyebrow">Activity</span><h2>Recent scans</h2></div><span className="count-badge">{history.length}</span></div>
+          <div className="history-list">
+            {history.length === 0 ? <div className="empty-compact"><span>⌁</span><p>No scans recorded yet.</p></div> : history.map((item) => (
+              <button key={item.jobId} className={`history-item ${jobId === item.jobId ? "selected" : ""}`} onClick={() => loadScan(item)}>
+                <span className={`status-dot ${item.status || "stored"}`} />
+                <span className="history-copy"><strong>{item.domain}</strong><small>{new Date(item.createdAt).toLocaleString()}</small></span>
+                <span className="history-state">{item.status || "stored"}</span>
+                <span className="history-arrow">›</span>
+              </button>
+            ))}
           </div>
-        )}
+        </aside>
 
-        {status === "completed" && result && (
-          <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mt-6">
-            {/* Domain Summary Card */}
-            <div className="p-4 border rounded-xl shadow bg-white">
-              <h2 className="font-bold text-lg mb-2">Domain Summary</h2>
-              <dl className="space-y-1 text-sm">
-                <div>
-                  <dt className="font-semibold">Domain</dt>
-                  <dd>{result.domain}</dd>
-                </div>
-                <div>
-                  <dt className="font-semibold">IP Address</dt>
-                  <dd>{ip.ip ?? "—"}</dd>
-                </div>
-                <div>
-                  <dt className="font-semibold">Organization</dt>
-                  <dd>{ip.org ?? "—"}</dd>
-                </div>
-                <div>
-                  <dt className="font-semibold">City</dt>
-                  <dd>{ip.city ?? "—"}</dd>
-                </div>
-                <div>
-                  <dt className="font-semibold">Country</dt>
-                  <dd>{ip.country ?? "—"}</dd>
-                </div>
-              </dl>
-            </div>
+        <section className="intel-panel" id="results">
+          <div className="section-heading intel-heading">
+            <div><span className="eyebrow">Current operation</span><h2>{result?.domain || domain || "Intelligence report"}</h2></div>
+            <div className="job-meta"><span className={`status-chip ${status}`}>{status === "running" && <i />}{status}</span>{jobId && <code>{jobId.slice(0, 8)}…</code>}</div>
+          </div>
 
-            {/* DNS Records Card */}
-            <div className="p-4 border rounded-xl shadow bg-white">
-              <h2 className="font-bold text-lg mb-2">DNS Records</h2>
-              <div className="space-y-2 text-sm">
-                <div>
-                  <div className="font-semibold">A</div>
-                  <ul className="list-disc list-inside">
-                    {(dns.A as string[] | undefined)?.length
-                      ? (dns.A as string[]).map((a) => <li key={a}>{a}</li>)
-                      : "—"}
-                  </ul>
-                </div>
-                <div>
-                  <div className="font-semibold">AAAA</div>
-                  <ul className="list-disc list-inside">
-                    {(dns.AAAA as string[] | undefined)?.length
-                      ? (dns.AAAA as string[]).map((a) => <li key={a}>{a}</li>)
-                      : "—"}
-                  </ul>
-                </div>
-                <div>
-                  <div className="font-semibold">MX</div>
-                  <ul className="list-disc list-inside">
-                    {(dns.MX as { exchange: string; priority: number }[] | undefined)
-                      ?.length
-                      ? (
-                          dns.MX as {
-                            exchange: string;
-                            priority: number;
-                          }[]
-                        ).map((mx) => (
-                          <li key={`${mx.exchange}-${mx.priority}`}>
-                            {mx.exchange} (prio {mx.priority})
-                          </li>
-                        ))
-                      : "—"}
-                  </ul>
-                </div>
-              </div>
-            </div>
+          {!result ? (
+            <div className="empty-report"><div className="scan-orbit"><span>⌖</span><i /><b /></div><h3>{activeScan ? (status === "queued" ? "Waiting for a scan worker" : "Building intelligence profile") : "No report selected"}</h3><p>{activeScan ? (status === "queued" ? "The durable queue accepted this scan and will start it shortly." : "DNS, WHOIS, service and technology probes are running.") : "Launch a scan or choose a previous target to populate this workspace."}</p></div>
+          ) : (
+            <div className="report-grid">
+              <article className="report-card summary-card">
+                <CardHeader icon="⌖" label="Target profile" count="01" />
+                <div className="target-title"><span>{result.domain.slice(0, 2).toUpperCase()}</span><div><strong>{result.domain}</strong><small>{ip.org || "Organization unavailable"}</small></div></div>
+                <dl className="detail-grid"><Detail label="IP address" value={ip.ip} /><Detail label="Location" value={[ip.city, ip.region, ip.country].filter(Boolean).join(", ")} /><Detail label="Country" value={ip.country} /></dl>
+              </article>
 
-            {/* Open Ports Card */}
-            <div className="p-4 border rounded-xl shadow bg-white">
-              <h2 className="font-bold text-lg mb-2">Open Ports</h2>
-              <div className="space-y-1 text-xs md:text-sm max-h-64 overflow-auto">
-                {ports.length === 0 ? (
-                  <div className="text-slate-500">No open ports detected or scan failed.</div>
-                ) : (
-                  ports.map((p, idx) => (
-                    <div
-                      key={`${p.host}-${p.port}-${p.protocol}-${idx}`}
-                      className="flex justify-between border-b border-slate-100 py-1"
-                    >
-                      <div>
-                        <div className="font-semibold">
-                          {p.port} / {p.protocol ?? "tcp"}
-                        </div>
-                        <div className="text-slate-600 text-xs">
-                          {p.service ?? "unknown"} ({p.state ?? "unknown"})
-                        </div>
-                      </div>
-                      <div className="text-xs text-slate-500 text-right">
-                        {p.host}
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
+              <article className="report-card">
+                <CardHeader icon="≋" label="DNS records" count={String((dns.A?.length || 0) + (dns.AAAA?.length || 0) + (dns.MX?.length || 0)).padStart(2, "0")} />
+                <RecordList label="A" items={dns.A} />
+                <RecordList label="AAAA" items={dns.AAAA} />
+                <RecordList label="MX" items={dns.MX?.map((mx) => `${mx.exchange} · priority ${mx.priority}`)} />
+              </article>
 
-            {/* WHOIS Card */}
-            <div className="p-4 border rounded-xl shadow bg-white">
-              <h2 className="font-bold text-lg mb-2">WHOIS</h2>
-              <dl className="space-y-1 text-sm">
-                <div>
-                  <dt className="font-semibold">Registrar</dt>
-                  <dd>{(whois.registrar as string) ?? "—"}</dd>
-                </div>
-                <div>
-                  <dt className="font-semibold">Creation Date</dt>
-                  <dd>
-                    {Array.isArray(whois.creation_date)
-                      ? (whois.creation_date[0] as string)
-                      : (whois.creation_date as string | null) ?? "—"}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="font-semibold">Expiration Date</dt>
-                  <dd>
-                    {Array.isArray(whois.expiration_date)
-                      ? (whois.expiration_date[0] as string)
-                      : (whois.expiration_date as string | null) ?? "—"}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="font-semibold">Emails</dt>
-                  <dd>
-                    {Array.isArray(whois.emails)
-                      ? (whois.emails as string[]).join(", ")
-                      : (whois.emails as string | null) ?? "—"}
-                  </dd>
-                </div>
-              </dl>
-            </div>
+              <article className="report-card">
+                <CardHeader icon="◫" label="Open services" count={String(ports.length).padStart(2, "0")} />
+                {ports.length ? <div className="port-list">{ports.map((port, index) => <div key={`${port.host}-${port.port}-${index}`}><span className="port-number">{port.port}</span><span><strong>{port.service || "Unknown service"}</strong><small>{port.host} · {port.protocol || "tcp"}</small></span><em>{port.state || "unknown"}</em></div>)}</div> : <EmptyCard text="No open ports detected" />}
+              </article>
 
-            {/* Subdomains Card */}
-            <div className="p-4 border rounded-xl shadow bg-white">
-              <h2 className="font-bold text-lg mb-2">Subdomains</h2>
-              {subdomains.length === 0 ? (
-                <div className="text-sm text-slate-500">No subdomains found.</div>
-              ) : (
-                <div className="max-h-64 overflow-auto">
-                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 text-xs">
-                    {subdomains.map((s) => (
-                      <div
-                        key={s}
-                        className="truncate rounded border border-slate-200 px-2 py-1 bg-slate-50"
-                      >
-                        {s}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
+              <article className="report-card">
+                <CardHeader icon="◉" label="WHOIS intelligence" count="04" />
+                <dl className="stacked-details"><Detail label="Registrar" value={whois.registrar} /><Detail label="Created" value={dateValue(whois.creation_date)} /><Detail label="Expires" value={dateValue(whois.expiration_date)} /><Detail label="Contact" value={Array.isArray(whois.emails) ? whois.emails.join(", ") : whois.emails} /></dl>
+              </article>
 
-            {/* Technologies Card */}
-            <div className="p-4 border rounded-xl shadow bg-white">
-              <h2 className="font-bold text-lg mb-2">Technologies</h2>
-              {technologies.length === 0 ? (
-                <div className="text-sm text-slate-500">No technologies detected.</div>
-              ) : (
-                <div className="flex flex-wrap gap-2 text-xs">
-                  {technologies.map((t) => (
-                    <span
-                      key={t}
-                      className="rounded-full bg-indigo-50 px-3 py-1 text-indigo-700 border border-indigo-100"
-                    >
-                      {t}
-                    </span>
-                  ))}
-                </div>
-              )}
+              <article className="report-card wide-card">
+                <CardHeader icon="⌘" label="Discovered subdomains" count={String(subdomains.length).padStart(2, "0")} />
+                {subdomains.length ? <div className="asset-cloud">{subdomains.map((item) => <span key={item}>{item}</span>)}</div> : <EmptyCard text="No subdomains discovered" />}
+              </article>
+
+              <article className="report-card">
+                <CardHeader icon="◇" label="Technology stack" count={String(technologies.length).padStart(2, "0")} />
+                {technologies.length ? <div className="tech-list">{technologies.map((item) => <span key={item}><i />{item}</span>)}</div> : <EmptyCard text="No technologies detected" />}
+              </article>
             </div>
-          </section>
-        )}
+          )}
+        </section>
       </div>
+      <footer><span>CyberRecon <b>v1.0</b></span><span>Authorized security testing only</span><span><i /> Secure session</span></footer>
     </main>
   );
 }
 
+function CardHeader({ icon, label, count }: { icon: string; label: string; count: string }) {
+  return <header className="card-header"><span className="card-icon">{icon}</span><h3>{label}</h3><em>{count}</em></header>;
+}
+
+function Detail({ label, value }: { label: string; value?: string | null }) {
+  return <div><dt>{label}</dt><dd>{value || <Dash />}</dd></div>;
+}
+
+function RecordList({ label, items }: { label: string; items?: string[] }) {
+  return <div className="record-group"><span>{label}</span><div>{items?.length ? items.map((item) => <code key={item}>{item}</code>) : <Dash />}</div></div>;
+}
+
+function EmptyCard({ text }: { text: string }) {
+  return <div className="empty-card"><span>∅</span><p>{text}</p></div>;
+}

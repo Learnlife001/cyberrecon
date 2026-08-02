@@ -1,4 +1,10 @@
+import logging
+import os
+import shutil
+
 import nmap
+
+logger = logging.getLogger(__name__)
 
 
 def run(domain):
@@ -9,11 +15,17 @@ def run(domain):
     results = []
 
     try:
-        scanner = nmap.PortScanner(
-            nmap_search_path=("C:/Program Files (x86)/Nmap/nmap.exe",)
-        )
+        configured_path = os.getenv("NMAP_PATH")
+        nmap_path = configured_path or shutil.which("nmap")
+        if not nmap_path:
+            logger.warning("Nmap is unavailable; skipping port scan")
+            return results
 
-        scanner.scan(domain, arguments="-T4")
+        scanner = nmap.PortScanner(nmap_search_path=(nmap_path,))
+        scanner.scan(
+            domain,
+            arguments="-T4 -Pn -p 1-1024 --host-timeout 30s",
+        )
 
         for host in scanner.all_hosts():
             host_state = scanner[host].state()
@@ -37,6 +49,6 @@ def run(domain):
 
         return results
 
-    except Exception as e:
-        print("Nmap scan error:", e)
+    except Exception:
+        logger.exception("Nmap scan failed for %s", domain)
         return []

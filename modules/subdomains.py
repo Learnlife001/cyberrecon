@@ -1,3 +1,4 @@
+import os
 import requests
 
 
@@ -9,10 +10,11 @@ def run(domain):
     subdomains = []
 
     try:
-        url = f"https://api.hackertarget.com/hostsearch/?q={domain}"
-        response = requests.get(url)
+        api_url = os.getenv("SUBDOMAIN_API_URL") or f"https://api.hackertarget.com/hostsearch/?q={domain}"
+        response = requests.get(api_url, timeout=10)
+        response.raise_for_status()
 
-        if "error" in response.text.lower() or response.status_code != 200:
+        if "error" in response.text.lower():
             return subdomains
 
         results = response.text.strip().split("\n")

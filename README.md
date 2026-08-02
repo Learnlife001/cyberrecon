@@ -1,190 +1,136 @@
-CyberRecon Web Reconnaissance Platform
+# CyberRecon
 
-CyberRecon is a production ready full stack reconnaissance platform built with FastAPI, Next.js, PostgreSQL, and cloud deployment infrastructure. The project demonstrates asynchronous scanning workflows, backend API orchestration, frontend polling systems, persistent scan history storage, and real world deployment practices.
+CyberRecon is a full-stack, asynchronous reconnaissance platform for security learning and authorized assessments. It combines a Next.js operations dashboard with a FastAPI API, a durable Redis/Celery job queue, PostgreSQL persistence, and containerized deployment.
 
+> Only scan domains and systems that you own or are explicitly authorized to assess.
 
-Live Deployment
+## What it demonstrates
 
-Frontend Dashboard
-https://cyberrecon.vercel.app
+- Automated DNS, WHOIS, IP, subdomain, port, and technology discovery
+- Durable background jobs with queued, running, completed, and failed states
+- Persistent scan history and structured results in PostgreSQL
+- API-key authentication, rate limiting, CORS controls, and target validation
+- Protection against scans of private, loopback, link-local, and reserved networks
+- Dockerized API, worker, PostgreSQL, and Redis services
+- Automated backend tests, frontend checks, dependency audits, and container builds
 
-Backend API Documentation
-https://cyberrecon-jriu.onrender.com/docs
+## Architecture
 
-Overview
+```mermaid
+flowchart LR
+    U[Analyst] --> UI[Next.js dashboard]
+    UI -->|X-API-Key| API[FastAPI API]
+    API --> DB[(PostgreSQL)]
+    API --> Q[(Redis queue)]
+    Q --> W[Celery worker]
+    W --> R[Recon modules]
+    R --> DNS[DNS / WHOIS / IP APIs]
+    R --> NMAP[Nmap]
+    W --> DB
+    UI -->|poll job status| API
+```
 
-CyberRecon was designed to simulate a real world reconnaissance workflow similar to the early stages of professional security assessments and bug bounty pipelines. The platform accepts a target domain and performs automated intelligence gathering including DNS enumeration, WHOIS lookup, IP intelligence, open port detection, subdomain discovery, and technology fingerprinting. It demonstrates backend API architecture, asynchronous job tracking, frontend polling logic, environment based configuration, and production cloud deployment integration. This project showcases both application development and infrastructure deployment skills rather than only local scripting or single layer tools.
+The API validates and queues each request. A separate Celery worker performs the reconnaissance and stores its results in PostgreSQL, so API restarts do not silently discard queued work. The dashboard polls the API and renders current status, intelligence panels, and scan history.
 
-Features
+## Technology stack
 
-Domain intelligence summary
-DNS record extraction
-WHOIS lookup
-Subdomain enumeration
-Open port detection
-Technology fingerprinting
-Asynchronous scan execution
-Job based polling system
-Persistent scan history storage
-Local and database backed history recovery
-Environment based deployment configuration
-Frontend and backend separation
-Production deployment on Vercel and Render
+| Layer | Technologies |
+| --- | --- |
+| Frontend | Next.js, React, TypeScript, Tailwind CSS |
+| API | Python, FastAPI, SQLAlchemy, Uvicorn |
+| Jobs | Celery, Redis |
+| Data | PostgreSQL |
+| Recon | Nmap, DNS, WHOIS, IP intelligence |
+| Delivery | Docker Compose, GitHub Actions |
 
-Architecture
+## Run the production-style stack locally
 
-Client requests are handled by a Next.js frontend application.
-The frontend submits scan jobs to a FastAPI backend service.
-The backend performs reconnaissance tasks asynchronously and stores results in PostgreSQL.
-Scan progress is tracked using job identifiers returned to the frontend.
-The frontend polls the backend until results are completed.
-Recent scan history is retrieved from both local storage and the backend database.
+Requirements: Docker Desktop and Docker Compose.
 
-The backend API is deployed on Render.
-
-The frontend dashboard is deployed on Vercel.
-
-Environment variables control API routing between development and production environments.
-
-Tech Stack
-
-Frontend
-
-Next.js
-React
-TypeScript
-Tailwind CSS
-
-Backend
-
-Python
-FastAPI
-SQLAlchemy
-Uvicorn
-
-Database
-
-Supabase
-
-Cloud and Deployment
-
-Render
-Vercel
-
-Dev Tools
-
-Environment variables
-REST API architecture
-Asynchronous polling workflows
-
-Security Concepts Demonstrated
-
-Environment variable configuration
-Backend service separation from frontend UI
-Controlled API polling architecture
-Input validation handling
-Cloud based deployment isolation
-
-Local Development Setup
-
-Clone the repository
-
+```powershell
 git clone https://github.com/Learnlife001/cyberrecon.git
 cd cyberrecon
+Copy-Item .env.example .env
+```
 
-Start backend server
+Generate a long random value for `SCAN_API_KEY` in `.env`, then start the services:
 
-cd backend
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-uvicorn api_server:app --reload
+```powershell
+docker compose up --build -d
+docker compose ps
+```
 
-Start frontend server
+The API is available at `http://localhost:8000`, with interactive documentation at `http://localhost:8000/docs`. Configure the frontend separately:
 
-cd frontend
+```powershell
+Set-Location frontend
+Copy-Item .env.example .env.local
 npm install
 npm run dev
+```
 
-Configure environment variables
+Open `http://localhost:3000`, enter the same API key in dashboard settings, and submit an authorized public domain.
 
-Create frontend/.env.local
+If port 8000 is already occupied, set `API_PORT` in `.env`, for example `API_PORT=8002`.
 
-NEXT_PUBLIC_API_URL=http://localhost:8000
+## Configuration
 
-Scan Workflow
+The root `.env.example` documents all backend settings. The important production values are:
 
-User submits target domain
+| Variable | Purpose |
+| --- | --- |
+| `DATABASE_URL` | PostgreSQL connection string |
+| `REDIS_URL` | Redis broker used by Celery |
+| `TASK_QUEUE_MODE` | Use `celery` for durable jobs or `inprocess` for development |
+| `SCAN_API_KEY` | Secret required in the `X-API-Key` header |
+| `ALLOWED_ORIGINS` | Comma-separated trusted frontend origins |
+| `SCAN_RATE_LIMIT` | Maximum scan submissions per rate window |
+| `NMAP_PATH` | Optional explicit path to the Nmap executable |
 
-Frontend sends request to
+Secrets are loaded from the environment and must never be committed. `.env` files are excluded from both Git and Docker build context.
 
-POST /scan
+## API workflow
 
-Backend returns job identifier
+1. `POST /scan` validates the target and returns a job identifier.
+2. Redis holds the durable task until a Celery worker accepts it.
+3. `GET /results/{job_id}` reports `queued`, `running`, `completed`, or `failed`.
+4. `GET /scans` returns persistent scan history.
+5. `GET /health` reports database health and the configured queue mode.
 
-Frontend polls
+Protected endpoints require:
 
-GET /results/{job_id}
+```http
+X-API-Key: your-configured-key
+```
 
-Until scan completes
+## Security controls
 
-Recent scans are retrieved from
+- Domains are normalized and resolved before scanning.
+- Targets resolving to non-public address ranges are rejected.
+- Scan endpoints require constant-time API-key validation.
+- Scan creation is rate-limited by client address.
+- CORS is restricted through configured origins.
+- Containers run as an unprivileged application user.
+- CI runs unit tests, Bandit, pip-audit, frontend lint/build/audit, and a Docker build.
 
-GET /scans
+These controls reduce accidental misuse; they do not turn the application into a multi-tenant commercial scanning service. Production use should add centralized identity, distributed rate limiting, audit logging, monitoring, and explicit authorization records.
 
-Results are rendered dynamically inside dashboard panels
+## Development checks
 
-CI and Deployment Workflow
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m compileall -q api_server.py worker.py modules
+Set-Location frontend
+npm run lint
+npm run build
+```
 
-Frontend is deployed automatically through Vercel
+## Portfolio highlights
 
-Backend is deployed through Render cloud services
+- Designed a resilient asynchronous scanning workflow instead of running long reconnaissance tasks inside request handlers.
+- Implemented security boundaries around authentication, public-target validation, rate limiting, secrets, and container privileges.
+- Integrated a responsive security operations interface with persisted intelligence and job-state tracking.
 
-Environment variables control API routing between development and production environments
+## Author
 
-Production deployments are separated from local development environments for stability and reliability
-
-Production Lessons Learned
-
-Environment configuration differences affect frontend backend communication
-
-CORS handling is required for cross origin deployments
-
-Polling architecture improves reliability of asynchronous scan workflows
-
-Database backed scan history enables persistent recon tracking
-
-Cloud deployment separation improves maintainability and debugging
-
-My Future Improvements
-
-Subdomain brute forcing engine integration
-
-HTTP service fingerprinting
-
-Directory enumeration support
-
-Export scan results as JSON or PDF
-
-Scan comparison history
-
-User authentication system
-
-Scan scheduling support
-
-Rate limiting protection
-
-Redis caching layer
-
-Monitoring and alerting integration
-
-Author
-
-Chigozie Okuma
-
-GitHub
-https://github.com/Learnlife001
-LinkedIn
-https://www.linkedin.com/in/cjokuma23/
-Portfolio
-https://learnlife-portfolio.vercel.app/
+Chigozie Okuma — [GitHub](https://github.com/Learnlife001) · [LinkedIn](https://www.linkedin.com/in/cjokuma23/) · [Portfolio](https://learnlife-portfolio.vercel.app/)
