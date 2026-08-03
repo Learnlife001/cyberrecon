@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { createClient } from "@supabase/supabase-js";
 
 type ReconResult = {
   domain: string;
@@ -36,20 +37,23 @@ type AuthUser = { id: string; email: string };
 const raw = process.env.NEXT_PUBLIC_API_URL;
 if (!raw) throw new Error("NEXT_PUBLIC_API_URL is not defined");
 const API_BASE = raw.replace(/\/$/, "");
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+if (!supabaseUrl || !supabaseKey) throw new Error("Supabase authentication is not configured");
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 const Dash = () => <span aria-hidden="true">—</span>;
 
 export default function Page() {
   const [domain, setDomain] = useState("");
-  const [accessToken, setAccessToken] = useState(() =>
-    typeof window === "undefined" ? "" : window.sessionStorage.getItem("cyberrecon_access_token") || ""
-  );
+  const [accessToken, setAccessToken] = useState("");
   const [user, setUser] = useState<AuthUser | null>(null);
   const [showAuth, setShowAuth] = useState(false);
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
+  const [authMessage, setAuthMessage] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const [status, setStatus] = useState<"idle" | "queued" | "running" | "completed" | "failed" | "error">("idle");
   const [result, setResult] = useState<ReconResult | null>(null);
@@ -58,28 +62,32 @@ export default function Page() {
   const activePoll = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    if (accessToken) void restoreSession(accessToken);
-    return () => activePoll.current?.abort();
-    // Session restoration intentionally runs only once for the token present at page load.
+    void supabase.auth.getSession().then(({ data }) => {
+      const session = data.session;
+      if (!session?.user.email) return;
+      setAccessToken(session.access_token);
+      setUser({ id: session.user.id, email: session.user.email });
+      void fetchHistoryFromAPI(session.access_token);
+    });
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session?.user.email) {
+        setAccessToken(session.access_token);
+        setUser({ id: session.user.id, email: session.user.email });
+      } else {
+        setAccessToken("");
+        setUser(null);
+      }
+    });
+    return () => {
+      activePoll.current?.abort();
+      authListener.subscription.unsubscribe();
+    };
+    // The API history loader is intentionally invoked only during session restoration.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function authHeaders(token = accessToken) {
     return { Authorization: `Bearer ${token}` };
-  }
-
-  async function restoreSession(token: string) {
-    try {
-      const response = await fetch(`${API_BASE}/auth/me`, { headers: authHeaders(token) });
-      if (!response.ok) throw new Error("Session expired");
-      const currentUser = await response.json() as AuthUser;
-      setUser(currentUser);
-      await fetchHistoryFromAPI(token);
-    } catch {
-      window.sessionStorage.removeItem("cyberrecon_access_token");
-      setAccessToken("");
-      setUser(null);
-    }
   }
 
   async function fetchHistoryFromAPI(token = accessToken) {
@@ -104,22 +112,33 @@ export default function Page() {
     if (!email.trim() || password.length < 10) return;
     setAuthLoading(true);
     setError(null);
+    setAuthMessage(null);
     try {
-      const response = await fetch(`${API_BASE}/auth/${authMode}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: email.trim(), password }),
-      });
-      const payload = await response.json().catch(() => null) as { detail?: string; access_token?: string; user?: AuthUser } | null;
-      if (!response.ok || !payload?.access_token || !payload.user) {
-        throw new Error(payload?.detail || `Authentication failed with ${response.status}`);
+      if (authMode === "register") {
+        const { data, error: signUpError } = await supabase.auth.signUp({
+          email: email.trim(),
+          password,
+          options: { emailRedirectTo: window.location.origin },
+        });
+        if (signUpError) throw signUpError;
+        setPassword("");
+        if (!data.session) {
+          setAuthMessage("Check your inbox and verify your email before signing in.");
+          return;
+        }
+      } else {
+        const { data, error: signInError } = await supabase.auth.signInWithPassword({
+          email: email.trim(),
+          password,
+        });
+        if (signInError) throw signInError;
+        if (!data.session || !data.user.email) throw new Error("Unable to establish a verified session");
+        setAccessToken(data.session.access_token);
+        setUser({ id: data.user.id, email: data.user.email });
+        setPassword("");
+        setShowAuth(false);
+        await fetchHistoryFromAPI(data.session.access_token);
       }
-      window.sessionStorage.setItem("cyberrecon_access_token", payload.access_token);
-      setAccessToken(payload.access_token);
-      setUser(payload.user);
-      setPassword("");
-      setShowAuth(false);
-      await fetchHistoryFromAPI(payload.access_token);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -127,9 +146,9 @@ export default function Page() {
     }
   }
 
-  function logout() {
+  async function logout() {
     activePoll.current?.abort();
-    window.sessionStorage.removeItem("cyberrecon_access_token");
+    await supabase.auth.signOut();
     setAccessToken("");
     setUser(null);
     setHistory([]);
@@ -273,7 +292,8 @@ export default function Page() {
         <aside className="settings-panel auth-panel" aria-label="Account access">
           <div><span className="eyebrow">Secure access</span><h2>{authMode === "login" ? "Sign in" : "Create account"}</h2></div>
           <button className="close-button" onClick={() => setShowAuth(false)} aria-label="Close account panel">×</button>
-          <p>Your account protects scan access and keeps reconnaissance history private.</p>
+          <p>Email verification is required before any account can run scans.</p>
+          {authMessage && <div className="auth-message" role="status">{authMessage}</div>}
           <div className="auth-tabs" role="tablist" aria-label="Account action">
             <button className={authMode === "login" ? "active" : ""} onClick={() => setAuthMode("login")}>Sign in</button>
             <button className={authMode === "register" ? "active" : ""} onClick={() => setAuthMode("register")}>Register</button>
@@ -285,7 +305,7 @@ export default function Page() {
           <button className="primary-button full" onClick={submitAuth} disabled={authLoading || !email.trim() || password.length < 10}>
             {authLoading ? "Please wait…" : authMode === "login" ? "Sign in securely" : "Create account"}
           </button>
-          <small className="auth-note">Limited to five authorized public-domain scans per hour.</small>
+          <small className="auth-note">A real inbox is required. Limited to five authorized public-domain scans per hour.</small>
         </aside>
       )}
 

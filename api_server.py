@@ -12,17 +12,16 @@ from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 
-import bcrypt
 import jwt
+from jwt import PyJWKClient
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from dotenv import load_dotenv
 from sqlalchemy import DateTime, ForeignKey, String, create_engine, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID as SA_UUID
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 try:
@@ -36,9 +35,7 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 SCAN_API_KEY = os.getenv("SCAN_API_KEY")
-JWT_SECRET = os.getenv("JWT_SECRET")
-JWT_ALGORITHM = "HS256"
-ACCESS_TOKEN_MINUTES = int(os.getenv("ACCESS_TOKEN_MINUTES", "30"))
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 TASK_QUEUE_MODE = os.getenv("TASK_QUEUE_MODE", "inprocess").strip().lower()
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
@@ -48,8 +45,11 @@ if not DATABASE_URL:
 if not SCAN_API_KEY:
     raise RuntimeError("SCAN_API_KEY is not set")
 
-if not JWT_SECRET or len(JWT_SECRET) < 32:
-    raise RuntimeError("JWT_SECRET must be set to at least 32 characters")
+if not SUPABASE_URL.startswith("https://"):
+    raise RuntimeError("SUPABASE_URL must be set to the HTTPS project URL")
+
+SUPABASE_ISSUER = f"{SUPABASE_URL}/auth/v1"
+supabase_jwks = PyJWKClient(f"{SUPABASE_ISSUER}/.well-known/jwks.json", cache_keys=True)
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
@@ -72,6 +72,7 @@ async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE scans ADD COLUMN IF NOT EXISTS user_id UUID"))
+        connection.execute(text("ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL"))
     if TASK_QUEUE_MODE == "inprocess":
         with SessionLocal() as db:
             db.query(Scan).filter(Scan.status == "running").update(
@@ -111,7 +112,7 @@ class User(Base):
         SA_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True, nullable=False)
-    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[object] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -178,74 +179,15 @@ DOMAIN_PATTERN = re.compile(
 )
 RATE_LIMIT = int(os.getenv("SCAN_RATE_LIMIT", "5"))
 RATE_WINDOW_SECONDS = int(os.getenv("SCAN_RATE_WINDOW_SECONDS", "3600"))
-AUTH_RATE_LIMIT = int(os.getenv("AUTH_RATE_LIMIT", "20"))
 rate_buckets: dict[str, deque[float]] = defaultdict(deque)
 rate_lock = threading.Lock()
 bearer_scheme = HTTPBearer(auto_error=False)
-EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
 class Principal(BaseModel):
     user_id: uuid.UUID | None = None
     email: str | None = None
     is_admin: bool = False
-
-
-class AuthRequest(BaseModel):
-    email: str = Field(min_length=3, max_length=320)
-    password: str = Field(min_length=10, max_length=128)
-
-
-class AuthResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-    expires_in: int
-    user: dict[str, str]
-
-
-def normalize_email(value: str) -> str:
-    email = value.strip().lower()
-    if len(email) > 320 or not EMAIL_PATTERN.fullmatch(email):
-        raise HTTPException(status_code=400, detail="Enter a valid email address")
-    return email
-
-
-def validate_password(value: str) -> None:
-    if len(value) < 10 or len(value) > 128:
-        raise HTTPException(status_code=400, detail="Password must contain 10 to 128 characters")
-
-
-def hash_password(value: str) -> str:
-    return bcrypt.hashpw(value.encode(), bcrypt.gensalt()).decode()
-
-
-def verify_password(value: str, password_hash: str) -> bool:
-    try:
-        return bcrypt.checkpw(value.encode(), password_hash.encode())
-    except ValueError:
-        return False
-
-
-def create_access_token(user: User) -> str:
-    now = datetime.now(timezone.utc)
-    return jwt.encode(
-        {
-            "sub": str(user.id),
-            "email": user.email,
-            "iat": now,
-            "exp": now + timedelta(minutes=ACCESS_TOKEN_MINUTES),
-        },
-        JWT_SECRET,
-        algorithm=JWT_ALGORITHM,
-    )
-
-
-def auth_response(user: User) -> AuthResponse:
-    return AuthResponse(
-        access_token=create_access_token(user),
-        expires_in=ACCESS_TOKEN_MINUTES * 60,
-        user={"id": str(user.id), "email": user.email},
-    )
 
 
 def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
@@ -264,15 +206,33 @@ def require_principal(
         raise HTTPException(status_code=401, detail="Authentication required")
 
     try:
-        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        signing_key = supabase_jwks.get_signing_key_from_jwt(credentials.credentials)
+        payload = jwt.decode(
+            credentials.credentials,
+            signing_key.key,
+            algorithms=["RS256", "ES256"],
+            audience="authenticated",
+            issuer=SUPABASE_ISSUER,
+        )
         user_id = uuid.UUID(payload["sub"])
+        email = str(payload["email"]).strip().lower()
     except (jwt.PyJWTError, KeyError, TypeError, ValueError) as exc:
         raise HTTPException(status_code=401, detail="Invalid or expired access token") from exc
 
     with SessionLocal() as db:
         user = db.get(User, user_id)
         if user is None:
-            raise HTTPException(status_code=401, detail="User account no longer exists")
+            user = db.query(User).filter(User.email == email).first()
+            if user is None:
+                user = User(id=user_id, email=email, password_hash=None)
+                db.add(user)
+            else:
+                user.password_hash = None
+            db.commit()
+            db.refresh(user)
+        elif user.email != email:
+            user.email = email
+            db.commit()
         return Principal(user_id=user.id, email=user.email)
 
 
@@ -301,8 +261,7 @@ def enforce_rate_limit(request: Request, scope: str = "scan") -> None:
         bucket = rate_buckets[client]
         while bucket and now - bucket[0] >= RATE_WINDOW_SECONDS:
             bucket.popleft()
-        limit = AUTH_RATE_LIMIT if scope == "auth" else RATE_LIMIT
-        if len(bucket) >= limit:
+        if len(bucket) >= RATE_LIMIT:
             raise HTTPException(status_code=429, detail=f"{scope.title()} rate limit exceeded")
         bucket.append(now)
 
@@ -375,36 +334,6 @@ def _run_scan_job(job_id: str, domain: str):
 
 class ScanRequest(BaseModel):
     domain: str
-
-
-@app.post("/auth/register", response_model=AuthResponse, status_code=201)
-def register(request: AuthRequest, http_request: Request):
-    enforce_rate_limit(http_request, "auth")
-    email = normalize_email(request.email)
-    validate_password(request.password)
-    with SessionLocal() as db:
-        if db.query(User).filter(User.email == email).first() is not None:
-            raise HTTPException(status_code=409, detail="An account already exists for this email")
-        user = User(email=email, password_hash=hash_password(request.password))
-        db.add(user)
-        try:
-            db.commit()
-        except IntegrityError as exc:
-            db.rollback()
-            raise HTTPException(status_code=409, detail="An account already exists for this email") from exc
-        db.refresh(user)
-        return auth_response(user)
-
-
-@app.post("/auth/login", response_model=AuthResponse)
-def login(request: AuthRequest, http_request: Request):
-    enforce_rate_limit(http_request, "auth")
-    email = normalize_email(request.email)
-    with SessionLocal() as db:
-        user = db.query(User).filter(User.email == email).first()
-        if user is None or not verify_password(request.password, user.password_hash):
-            raise HTTPException(status_code=401, detail="Invalid email or password")
-        return auth_response(user)
 
 
 @app.get("/auth/me")
