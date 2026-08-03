@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from fastapi import HTTPException
+from fastapi.security import HTTPAuthorizationCredentials
 
 
 os.environ.setdefault(
@@ -10,6 +11,7 @@ os.environ.setdefault(
     "postgresql+psycopg://test:test@127.0.0.1:65432/cyberrecon_test",
 )
 os.environ.setdefault("SCAN_API_KEY", "unit-test-api-key")
+os.environ.setdefault("JWT_SECRET", "unit-test-jwt-secret-with-at-least-32-characters")
 os.environ.setdefault("TASK_QUEUE_MODE", "inprocess")
 
 import api_server
@@ -37,6 +39,30 @@ class ApiSecurityTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as context:
             api_server.require_api_key("wrong-key")
         self.assertEqual(context.exception.status_code, 401)
+
+    def test_password_hash_is_not_plaintext_and_verifies(self):
+        password_hash = api_server.hash_password("a-strong-password")
+        self.assertNotEqual(password_hash, "a-strong-password")
+        self.assertTrue(api_server.verify_password("a-strong-password", password_hash))
+        self.assertFalse(api_server.verify_password("wrong-password", password_hash))
+
+    def test_email_is_normalized(self):
+        self.assertEqual(api_server.normalize_email(" User@Example.COM "), "user@example.com")
+
+    def test_authentication_is_required_without_token_or_admin_key(self):
+        with self.assertRaises(HTTPException) as context:
+            api_server.require_principal(None, None)
+        self.assertEqual(context.exception.status_code, 401)
+
+    def test_invalid_bearer_token_is_rejected(self):
+        credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials="invalid-token")
+        with self.assertRaises(HTTPException) as context:
+            api_server.require_principal(credentials, None)
+        self.assertEqual(context.exception.status_code, 401)
+
+    def test_admin_api_key_remains_available_for_automation(self):
+        principal = api_server.require_principal(None, "unit-test-api-key")
+        self.assertTrue(principal.is_admin)
 
     def test_worker_registers_durable_scan_task(self):
         self.assertEqual(worker.run_scan_job.name, "cyberrecon.run_scan")

@@ -31,6 +31,8 @@ type ApiScanHistoryItem = {
   status?: unknown;
 };
 
+type AuthUser = { id: string; email: string };
+
 const raw = process.env.NEXT_PUBLIC_API_URL;
 if (!raw) throw new Error("NEXT_PUBLIC_API_URL is not defined");
 const API_BASE = raw.replace(/\/$/, "");
@@ -39,27 +41,50 @@ const Dash = () => <span aria-hidden="true">—</span>;
 
 export default function Page() {
   const [domain, setDomain] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [showSettings, setShowSettings] = useState(false);
+  const [accessToken, setAccessToken] = useState(() =>
+    typeof window === "undefined" ? "" : window.sessionStorage.getItem("cyberrecon_access_token") || ""
+  );
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [showAuth, setShowAuth] = useState(false);
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [authLoading, setAuthLoading] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [status, setStatus] = useState<"idle" | "queued" | "running" | "completed" | "failed" | "error">("idle");
   const [result, setResult] = useState<ReconResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [history, setHistory] = useState<ScanHistoryItem[]>(() => {
-    try {
-      const stored = JSON.parse(localStorage.getItem("scan_history") || "[]") as unknown;
-      return Array.isArray(stored) ? (stored as ScanHistoryItem[]) : [];
-    } catch {
-      return [];
-    }
-  });
+  const [history, setHistory] = useState<ScanHistoryItem[]>([]);
   const activePoll = useRef<AbortController | null>(null);
 
-  useEffect(() => () => activePoll.current?.abort(), []);
+  useEffect(() => {
+    if (accessToken) void restoreSession(accessToken);
+    return () => activePoll.current?.abort();
+    // Session restoration intentionally runs only once for the token present at page load.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  async function fetchHistoryFromAPI(key: string) {
+  function authHeaders(token = accessToken) {
+    return { Authorization: `Bearer ${token}` };
+  }
+
+  async function restoreSession(token: string) {
     try {
-      const res = await fetch(`${API_BASE}/scans`, { headers: { "X-API-Key": key } });
+      const response = await fetch(`${API_BASE}/auth/me`, { headers: authHeaders(token) });
+      if (!response.ok) throw new Error("Session expired");
+      const currentUser = await response.json() as AuthUser;
+      setUser(currentUser);
+      await fetchHistoryFromAPI(token);
+    } catch {
+      window.sessionStorage.removeItem("cyberrecon_access_token");
+      setAccessToken("");
+      setUser(null);
+    }
+  }
+
+  async function fetchHistoryFromAPI(token = accessToken) {
+    try {
+      const res = await fetch(`${API_BASE}/scans`, { headers: authHeaders(token) });
       if (!res.ok) throw new Error(`History request failed with ${res.status}`);
       const data = (await res.json()) as unknown;
       if (!Array.isArray(data)) return;
@@ -75,44 +100,63 @@ export default function Page() {
     }
   }
 
-  async function connect() {
-    const key = apiKey.trim();
-    if (!key) return;
+  async function submitAuth() {
+    if (!email.trim() || password.length < 10) return;
+    setAuthLoading(true);
     setError(null);
-    await fetchHistoryFromAPI(key);
-    setShowSettings(false);
+    try {
+      const response = await fetch(`${API_BASE}/auth/${authMode}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email.trim(), password }),
+      });
+      const payload = await response.json().catch(() => null) as { detail?: string; access_token?: string; user?: AuthUser } | null;
+      if (!response.ok || !payload?.access_token || !payload.user) {
+        throw new Error(payload?.detail || `Authentication failed with ${response.status}`);
+      }
+      window.sessionStorage.setItem("cyberrecon_access_token", payload.access_token);
+      setAccessToken(payload.access_token);
+      setUser(payload.user);
+      setPassword("");
+      setShowAuth(false);
+      await fetchHistoryFromAPI(payload.access_token);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  function logout() {
+    activePoll.current?.abort();
+    window.sessionStorage.removeItem("cyberrecon_access_token");
+    setAccessToken("");
+    setUser(null);
+    setHistory([]);
+    setResult(null);
+    setJobId(null);
+    setStatus("idle");
   }
 
   function saveToHistory(id: string, target: string, nextStatus = "running") {
-    const existing = (() => {
-      try {
-        return JSON.parse(localStorage.getItem("scan_history") || "[]") as ScanHistoryItem[];
-      } catch {
-        return [];
-      }
-    })();
-    const updated = [
+    setHistory((current) => [
       { jobId: id, domain: target, createdAt: new Date().toISOString(), status: nextStatus },
-      ...existing.filter((item) => item.jobId !== id),
-    ].slice(0, 20);
-    localStorage.setItem("scan_history", JSON.stringify(updated));
-    setHistory(updated);
+      ...current.filter((item) => item.jobId !== id),
+    ].slice(0, 20));
   }
 
   function updateHistoryStatus(id: string, nextStatus: string) {
-    const updated = history.map((item) => item.jobId === id ? { ...item, status: nextStatus } : item);
-    localStorage.setItem("scan_history", JSON.stringify(updated));
-    setHistory(updated);
+    setHistory((current) => current.map((item) => item.jobId === id ? { ...item, status: nextStatus } : item));
   }
 
-  async function pollResults(id: string, key: string) {
+  async function pollResults(id: string, token = accessToken) {
     activePoll.current?.abort();
     const controller = new AbortController();
     activePoll.current = controller;
     try {
       while (!controller.signal.aborted) {
         const res = await fetch(`${API_BASE}/results/${id}`, {
-          headers: { "X-API-Key": key },
+          headers: authHeaders(token),
           signal: controller.signal,
         });
         if (!res.ok) throw new Error(`Results request failed with ${res.status}`);
@@ -142,10 +186,9 @@ export default function Page() {
 
   async function startScan() {
     const target = domain.trim();
-    const key = apiKey.trim();
-    if (!key) {
-      setShowSettings(true);
-      setError("Add your scan API key to continue.");
+    if (!accessToken || !user) {
+      setShowAuth(true);
+      setError("Sign in or create an account to launch a scan.");
       return;
     }
     if (!target) return;
@@ -156,7 +199,7 @@ export default function Page() {
     try {
       const res = await fetch(`${API_BASE}/scan`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-API-Key": key },
+        headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify({ domain: target }),
       });
       if (!res.ok) {
@@ -169,7 +212,7 @@ export default function Page() {
       setStatus(initialStatus);
       setJobId(job.job_id);
       saveToHistory(job.job_id, target, initialStatus);
-      void pollResults(job.job_id, key);
+      void pollResults(job.job_id);
     } catch (e) {
       setStatus("error");
       setError(e instanceof Error ? e.message : String(e));
@@ -177,10 +220,9 @@ export default function Page() {
   }
 
   function loadScan(item: ScanHistoryItem) {
-    const key = apiKey.trim();
-    if (!key) {
-      setShowSettings(true);
-      setError("Add your scan API key to load stored results.");
+    if (!accessToken || !user) {
+      setShowAuth(true);
+      setError("Sign in to load your stored results.");
       return;
     }
     setDomain(item.domain);
@@ -188,7 +230,7 @@ export default function Page() {
     setResult(null);
     setError(null);
     setStatus("running");
-    void pollResults(item.jobId, key);
+    void pollResults(item.jobId);
   }
 
   const dns = result?.dns ?? {};
@@ -216,18 +258,34 @@ export default function Page() {
         </nav>
         <div className="top-actions">
           <span className="system-pill"><i /> API online</span>
-          <button className="icon-button" onClick={() => setShowSettings((value) => !value)} aria-label="API settings">⚙</button>
+          {user ? (
+            <div className="account-actions">
+              <span className="account-email">{user.email}</span>
+              <button className="secondary-button" onClick={logout}>Sign out</button>
+            </div>
+          ) : (
+            <button className="secondary-button" onClick={() => setShowAuth(true)}>Sign in</button>
+          )}
         </div>
       </header>
 
-      {showSettings && (
-        <aside className="settings-panel" aria-label="API settings">
-          <div><span className="eyebrow">Secure access</span><h2>API connection</h2></div>
-          <button className="close-button" onClick={() => setShowSettings(false)} aria-label="Close settings">×</button>
-          <p>The key stays in this browser tab and is never compiled into the application.</p>
-          <label htmlFor="api-key">Scan API key</label>
-          <input id="api-key" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="Enter access key" autoComplete="off" />
-          <button className="primary-button full" onClick={connect} disabled={!apiKey.trim()}>Connect & load history</button>
+      {showAuth && (
+        <aside className="settings-panel auth-panel" aria-label="Account access">
+          <div><span className="eyebrow">Secure access</span><h2>{authMode === "login" ? "Sign in" : "Create account"}</h2></div>
+          <button className="close-button" onClick={() => setShowAuth(false)} aria-label="Close account panel">×</button>
+          <p>Your account protects scan access and keeps reconnaissance history private.</p>
+          <div className="auth-tabs" role="tablist" aria-label="Account action">
+            <button className={authMode === "login" ? "active" : ""} onClick={() => setAuthMode("login")}>Sign in</button>
+            <button className={authMode === "register" ? "active" : ""} onClick={() => setAuthMode("register")}>Register</button>
+          </div>
+          <label htmlFor="account-email">Email address</label>
+          <input id="account-email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" autoComplete="email" />
+          <label htmlFor="account-password">Password</label>
+          <input id="account-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void submitAuth(); }} placeholder="At least 10 characters" autoComplete={authMode === "login" ? "current-password" : "new-password"} />
+          <button className="primary-button full" onClick={submitAuth} disabled={authLoading || !email.trim() || password.length < 10}>
+            {authLoading ? "Please wait…" : authMode === "login" ? "Sign in securely" : "Create account"}
+          </button>
+          <small className="auth-note">Limited to five authorized public-domain scans per hour.</small>
         </aside>
       )}
 

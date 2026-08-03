@@ -9,7 +9,7 @@ CyberRecon is a full-stack, asynchronous reconnaissance platform for security le
 - Automated DNS, WHOIS, IP, subdomain, port, and technology discovery
 - Durable background jobs with queued, running, completed, and failed states
 - Persistent scan history and structured results in PostgreSQL
-- API-key authentication, rate limiting, CORS controls, and target validation
+- User registration, password hashing, short-lived JWT authentication, per-user authorization, and rate limiting
 - Protection against scans of private, loopback, link-local, and reserved networks
 - Dockerized API, worker, PostgreSQL, and Redis services
 - Automated backend tests, frontend checks, dependency audits, and container builds
@@ -19,7 +19,7 @@ CyberRecon is a full-stack, asynchronous reconnaissance platform for security le
 ```mermaid
 flowchart LR
     U[Analyst] --> UI[Next.js dashboard]
-    UI -->|X-API-Key| API[FastAPI API]
+    UI -->|Bearer JWT| API[FastAPI API]
     API --> DB[(PostgreSQL)]
     API --> Q[(Redis queue)]
     Q --> W[Celery worker]
@@ -53,7 +53,7 @@ cd cyberrecon
 Copy-Item .env.example .env
 ```
 
-Generate a long random value for `SCAN_API_KEY` in `.env`, then start the services:
+Generate long random values for `SCAN_API_KEY` and `JWT_SECRET` in `.env`, then start the services:
 
 ```powershell
 docker compose up --build -d
@@ -69,7 +69,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`, enter the same API key in dashboard settings, and submit an authorized public domain.
+Open `http://localhost:3000`, register an account, and submit an authorized public domain. The API key remains an administrative fallback and is never embedded in the browser application.
 
 If port 8000 is already occupied, set `API_PORT` in `.env`, for example `API_PORT=8002`.
 
@@ -83,6 +83,8 @@ The root `.env.example` documents all backend settings. The important production
 | `REDIS_URL` | Redis broker used by Celery |
 | `TASK_QUEUE_MODE` | Use `celery` for durable jobs or `inprocess` for development |
 | `SCAN_API_KEY` | Secret required in the `X-API-Key` header |
+| `JWT_SECRET` | Secret used to sign short-lived user access tokens |
+| `ACCESS_TOKEN_MINUTES` | Lifetime of user access tokens; defaults to 30 minutes |
 | `ALLOWED_ORIGINS` | Comma-separated trusted frontend origins |
 | `SCAN_RATE_LIMIT` | Maximum scan submissions per rate window |
 | `NMAP_PATH` | Optional explicit path to the Nmap executable |
@@ -91,29 +93,34 @@ Secrets are loaded from the environment and must never be committed. `.env` file
 
 ## API workflow
 
-1. `POST /scan` validates the target and returns a job identifier.
-2. Redis holds the durable task until a Celery worker accepts it.
-3. `GET /results/{job_id}` reports `queued`, `running`, `completed`, or `failed`.
-4. `GET /scans` returns persistent scan history.
-5. `GET /health` reports database health and the configured queue mode.
+1. `POST /auth/register` or `POST /auth/login` returns a short-lived access token.
+2. `POST /scan` validates the target, applies the account rate limit, and returns a job identifier.
+3. Redis holds the durable task until a Celery worker accepts it.
+4. `GET /results/{job_id}` reports `queued`, `running`, `completed`, or `failed` for scans owned by that user.
+5. `GET /scans` returns the authenticated user's persistent scan history.
+6. `GET /health` reports database health and the configured queue mode.
 
-Protected endpoints require:
+User-facing protected endpoints require:
 
 ```http
-X-API-Key: your-configured-key
+Authorization: Bearer your-short-lived-token
 ```
+
+Administrative automation may instead use the private `X-API-Key` value.
 
 ## Security controls
 
 - Domains are normalized and resolved before scanning.
 - Targets resolving to non-public address ranges are rejected.
-- Scan endpoints require constant-time API-key validation.
-- Scan creation is rate-limited by client address.
+- Passwords are hashed with bcrypt and never returned by the API.
+- JWT access tokens expire after 30 minutes by default.
+- Scan results and history are restricted to their owning account.
+- Scan creation is rate-limited per account, with separate IP controls for authentication and administrative requests.
 - CORS is restricted through configured origins.
 - Containers run as an unprivileged application user.
 - CI runs unit tests, Bandit, pip-audit, frontend lint/build/audit, and a Docker build.
 
-These controls reduce accidental misuse; they do not turn the application into a multi-tenant commercial scanning service. Production use should add centralized identity, distributed rate limiting, audit logging, monitoring, and explicit authorization records.
+These controls reduce accidental misuse; they do not turn the application into a commercial scanning service. Larger deployments should add email verification, password reset, distributed rate limiting, audit logging, monitoring, and explicit authorization records.
 
 ## Development checks
 

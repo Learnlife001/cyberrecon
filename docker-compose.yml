@@ -29,6 +29,7 @@ services:
     environment: &backend-env
       DATABASE_URL: postgresql+psycopg://cyberrecon:${POSTGRES_PASSWORD:-development-only}@postgres:5432/cyberrecon
       SCAN_API_KEY: ${SCAN_API_KEY:-local-development-key-change-me}
+      JWT_SECRET: ${JWT_SECRET:-local-development-jwt-secret-change-me-now}
       ALLOWED_ORIGINS: http://localhost:3000
       TASK_QUEUE_MODE: celery
       REDIS_URL: redis://redis:6379/0

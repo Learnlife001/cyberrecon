@@ -8,16 +8,21 @@ import time
 import uuid
 import logging
 import json
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 
+import bcrypt
+import jwt
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from sqlalchemy import DateTime, ForeignKey, String, create_engine, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID as SA_UUID
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 try:
@@ -31,6 +36,9 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 SCAN_API_KEY = os.getenv("SCAN_API_KEY")
+JWT_SECRET = os.getenv("JWT_SECRET")
+JWT_ALGORITHM = "HS256"
+ACCESS_TOKEN_MINUTES = int(os.getenv("ACCESS_TOKEN_MINUTES", "30"))
 TASK_QUEUE_MODE = os.getenv("TASK_QUEUE_MODE", "inprocess").strip().lower()
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
@@ -39,6 +47,9 @@ if not DATABASE_URL:
 
 if not SCAN_API_KEY:
     raise RuntimeError("SCAN_API_KEY is not set")
+
+if not JWT_SECRET or len(JWT_SECRET) < 32:
+    raise RuntimeError("JWT_SECRET must be set to at least 32 characters")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
@@ -59,6 +70,8 @@ celery_client = (
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE scans ADD COLUMN IF NOT EXISTS user_id UUID"))
     if TASK_QUEUE_MODE == "inprocess":
         with SessionLocal() as db:
             db.query(Scan).filter(Scan.status == "running").update(
@@ -81,7 +94,7 @@ app.add_middleware(
     allow_origins=origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "X-API-Key"],
+    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -89,6 +102,19 @@ logger = logging.getLogger("cyberrecon")
 
 class Base(DeclarativeBase):
     pass
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        SA_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 class Scan(Base):
     __tablename__ = "scans"
@@ -100,6 +126,10 @@ class Scan(Base):
     )
 
     domain: Mapped[str] = mapped_column(String, nullable=False)
+
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        SA_UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True
+    )
 
     status: Mapped[str] = mapped_column(
         String,
@@ -148,13 +178,102 @@ DOMAIN_PATTERN = re.compile(
 )
 RATE_LIMIT = int(os.getenv("SCAN_RATE_LIMIT", "5"))
 RATE_WINDOW_SECONDS = int(os.getenv("SCAN_RATE_WINDOW_SECONDS", "3600"))
+AUTH_RATE_LIMIT = int(os.getenv("AUTH_RATE_LIMIT", "20"))
 rate_buckets: dict[str, deque[float]] = defaultdict(deque)
 rate_lock = threading.Lock()
+bearer_scheme = HTTPBearer(auto_error=False)
+EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+
+class Principal(BaseModel):
+    user_id: uuid.UUID | None = None
+    email: str | None = None
+    is_admin: bool = False
+
+
+class AuthRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=10, max_length=128)
+
+
+class AuthResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    user: dict[str, str]
+
+
+def normalize_email(value: str) -> str:
+    email = value.strip().lower()
+    if len(email) > 320 or not EMAIL_PATTERN.fullmatch(email):
+        raise HTTPException(status_code=400, detail="Enter a valid email address")
+    return email
+
+
+def validate_password(value: str) -> None:
+    if len(value) < 10 or len(value) > 128:
+        raise HTTPException(status_code=400, detail="Password must contain 10 to 128 characters")
+
+
+def hash_password(value: str) -> str:
+    return bcrypt.hashpw(value.encode(), bcrypt.gensalt()).decode()
+
+
+def verify_password(value: str, password_hash: str) -> bool:
+    try:
+        return bcrypt.checkpw(value.encode(), password_hash.encode())
+    except ValueError:
+        return False
+
+
+def create_access_token(user: User) -> str:
+    now = datetime.now(timezone.utc)
+    return jwt.encode(
+        {
+            "sub": str(user.id),
+            "email": user.email,
+            "iat": now,
+            "exp": now + timedelta(minutes=ACCESS_TOKEN_MINUTES),
+        },
+        JWT_SECRET,
+        algorithm=JWT_ALGORITHM,
+    )
+
+
+def auth_response(user: User) -> AuthResponse:
+    return AuthResponse(
+        access_token=create_access_token(user),
+        expires_in=ACCESS_TOKEN_MINUTES * 60,
+        user={"id": str(user.id), "email": user.email},
+    )
 
 
 def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
     if x_api_key is None or not secrets.compare_digest(x_api_key, SCAN_API_KEY):
         raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+def require_principal(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    x_api_key: str | None = Header(default=None),
+) -> Principal:
+    if x_api_key and secrets.compare_digest(x_api_key, SCAN_API_KEY):
+        return Principal(is_admin=True)
+
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = uuid.UUID(payload["sub"])
+    except (jwt.PyJWTError, KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=401, detail="Invalid or expired access token") from exc
+
+    with SessionLocal() as db:
+        user = db.get(User, user_id)
+        if user is None:
+            raise HTTPException(status_code=401, detail="User account no longer exists")
+        return Principal(user_id=user.id, email=user.email)
 
 
 def normalize_domain(value: str) -> str:
@@ -174,16 +293,33 @@ def validate_public_domain(domain: str) -> None:
         raise HTTPException(status_code=400, detail="Target must resolve only to public IP addresses")
 
 
-def enforce_rate_limit(request: Request) -> None:
-    client = request.client.host if request.client else "unknown"
+def enforce_rate_limit(request: Request, scope: str = "scan") -> None:
+    address = request.client.host if request.client else "unknown"
+    client = f"{scope}:{address}"
     now = time.monotonic()
     with rate_lock:
         bucket = rate_buckets[client]
         while bucket and now - bucket[0] >= RATE_WINDOW_SECONDS:
             bucket.popleft()
-        if len(bucket) >= RATE_LIMIT:
-            raise HTTPException(status_code=429, detail="Scan rate limit exceeded")
+        limit = AUTH_RATE_LIMIT if scope == "auth" else RATE_LIMIT
+        if len(bucket) >= limit:
+            raise HTTPException(status_code=429, detail=f"{scope.title()} rate limit exceeded")
         bucket.append(now)
+
+
+def enforce_user_rate_limit(user_id: uuid.UUID) -> None:
+    window_start = datetime.now(timezone.utc) - timedelta(seconds=RATE_WINDOW_SECONDS)
+    with SessionLocal() as db:
+        recent_count = (
+            db.query(Scan)
+            .filter(Scan.user_id == user_id, Scan.created_at >= window_start)
+            .count()
+        )
+    if recent_count >= RATE_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Scan limit reached. Each account may run {RATE_LIMIT} scans per hour.",
+        )
 
 
 def _run_scan_job(job_id: str, domain: str):
@@ -240,12 +376,58 @@ def _run_scan_job(job_id: str, domain: str):
 class ScanRequest(BaseModel):
     domain: str
 
-@app.post("/scan", dependencies=[Depends(require_api_key)])
-def scan(request: ScanRequest, background_tasks: BackgroundTasks, http_request: Request):
+
+@app.post("/auth/register", response_model=AuthResponse, status_code=201)
+def register(request: AuthRequest, http_request: Request):
+    enforce_rate_limit(http_request, "auth")
+    email = normalize_email(request.email)
+    validate_password(request.password)
+    with SessionLocal() as db:
+        if db.query(User).filter(User.email == email).first() is not None:
+            raise HTTPException(status_code=409, detail="An account already exists for this email")
+        user = User(email=email, password_hash=hash_password(request.password))
+        db.add(user)
+        try:
+            db.commit()
+        except IntegrityError as exc:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="An account already exists for this email") from exc
+        db.refresh(user)
+        return auth_response(user)
+
+
+@app.post("/auth/login", response_model=AuthResponse)
+def login(request: AuthRequest, http_request: Request):
+    enforce_rate_limit(http_request, "auth")
+    email = normalize_email(request.email)
+    with SessionLocal() as db:
+        user = db.query(User).filter(User.email == email).first()
+        if user is None or not verify_password(request.password, user.password_hash):
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        return auth_response(user)
+
+
+@app.get("/auth/me")
+def auth_me(principal: Principal = Depends(require_principal)):
+    if principal.is_admin:
+        return {"id": "admin", "email": "administrator", "is_admin": True}
+    return {"id": str(principal.user_id), "email": principal.email, "is_admin": False}
+
+
+@app.post("/scan")
+def scan(
+    request: ScanRequest,
+    background_tasks: BackgroundTasks,
+    http_request: Request,
+    principal: Principal = Depends(require_principal),
+):
 
     domain = normalize_domain(request.domain)
     validate_public_domain(domain)
-    enforce_rate_limit(http_request)
+    if principal.user_id is not None:
+        enforce_user_rate_limit(principal.user_id)
+    else:
+        enforce_rate_limit(http_request)
 
     job_uuid = uuid.uuid4()
 
@@ -259,7 +441,8 @@ def scan(request: ScanRequest, background_tasks: BackgroundTasks, http_request: 
             Scan(
                 id=job_uuid,
                 domain=domain,
-                status=initial_status
+                status=initial_status,
+                user_id=principal.user_id,
             )
         )
 
@@ -285,8 +468,8 @@ def scan(request: ScanRequest, background_tasks: BackgroundTasks, http_request: 
     }
 
 
-@app.get("/results/{job_id}", dependencies=[Depends(require_api_key)])
-def get_results(job_id: str):
+@app.get("/results/{job_id}")
+def get_results(job_id: str, principal: Principal = Depends(require_principal)):
 
     try:
         scan_uuid = uuid.UUID(job_id)
@@ -308,6 +491,9 @@ def get_results(job_id: str):
                 status_code=404,
                 detail="Job not found"
             )
+
+        if not principal.is_admin and scan.user_id != principal.user_id:
+            raise HTTPException(status_code=404, detail="Job not found")
 
         if scan.status in {"queued", "running"}:
             return {"status": scan.status}
@@ -334,15 +520,13 @@ def get_results(job_id: str):
         }
 
 
-@app.get("/scans", dependencies=[Depends(require_api_key)])
-def list_scans():
+@app.get("/scans")
+def list_scans(principal: Principal = Depends(require_principal)):
     with SessionLocal() as db:
-        scans = (
-            db.query(Scan)
-            .order_by(Scan.created_at.desc())
-            .limit(20)
-            .all()
-        )
+        query = db.query(Scan)
+        if not principal.is_admin:
+            query = query.filter(Scan.user_id == principal.user_id)
+        scans = query.order_by(Scan.created_at.desc()).limit(20).all()
 
         return [
             {
