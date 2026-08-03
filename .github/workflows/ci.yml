@@ -11,6 +11,13 @@ permissions:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    env:
+      # Test-only placeholders. CI never connects to this non-listening database.
+      DATABASE_URL: postgresql+psycopg://test:test@127.0.0.1:65432/cyberrecon_test
+      SCAN_API_KEY: unit-test-api-key
+      SUPABASE_URL: https://test-project.supabase.co
+      TASK_QUEUE_MODE: inprocess
+      ALLOWED_ORIGINS: http://localhost:3000
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -21,7 +28,7 @@ jobs:
       - run: python -m unittest discover -s tests -v
       - run: python -m compileall -q api_server.py worker.py modules
       - run: bandit -r api_server.py worker.py modules -lll
-      - run: pip-audit
+      - run: pip-audit -r requirements.txt
 
   frontend:
     runs-on: ubuntu-latest
@@ -40,6 +47,8 @@ jobs:
       - run: npm run build
         env:
           NEXT_PUBLIC_API_URL: http://localhost:8000
+          NEXT_PUBLIC_SUPABASE_URL: https://test-project.supabase.co
+          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ci-test-publishable-key-not-a-secret
       - run: npm audit --omit=dev --audit-level=critical
 
   container:
