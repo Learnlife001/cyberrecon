@@ -15,7 +15,7 @@ services:
       - key: SUPABASE_URL
         value: https://noefgcljunhoryqhmvjx.supabase.co
       - key: ALLOWED_ORIGINS
-        value: https://cyberrecon.vercel.app
+        value: https://cgreglab.space,https://cyberrecon.vercel.app
       - key: TASK_QUEUE_MODE
         value: inprocess
       - key: NMAP_PATH

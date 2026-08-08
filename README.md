@@ -69,7 +69,7 @@ npm install
 npm run dev
 ```
 
-Add the Supabase URL and publishable browser key to `frontend/.env.local`. Open `http://localhost:3000`, register with a real email address, follow the confirmation link, and then sign in. The API key remains an administrative fallback and is never embedded in the browser application.
+Add the Supabase URL and publishable browser key to `frontend/.env.local`, then run `npm run dev -- --port 3001`. Open `http://localhost:3001`, register with a real email address, follow the confirmation link, and then sign in. The API key remains an administrative fallback and is never embedded in the browser application.
 
 If port 8000 is already occupied, set `API_PORT` in `.env`, for example `API_PORT=8002`.
 

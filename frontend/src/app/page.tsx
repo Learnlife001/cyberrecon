@@ -34,13 +34,15 @@ type ApiScanHistoryItem = {
 
 type AuthUser = { id: string; email: string };
 
-const raw = process.env.NEXT_PUBLIC_API_URL;
-if (!raw) throw new Error("NEXT_PUBLIC_API_URL is not defined");
-const API_BASE = raw.replace(/\/$/, "");
+const API_BASE = (
+  process.env.NODE_ENV === "development"
+    ? "http://localhost:8000"
+    : process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
+).replace(/\/$/, "");
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
-if (!supabaseUrl || !supabaseKey) throw new Error("Supabase authentication is not configured");
-const supabase = createClient(supabaseUrl, supabaseKey);
+const authConfigured = Boolean(supabaseUrl && supabaseKey);
+const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
 
 const Dash = () => <span aria-hidden="true">—</span>;
 
@@ -54,6 +56,7 @@ export default function Page() {
   const [password, setPassword] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
   const [authMessage, setAuthMessage] = useState<string | null>(null);
+  const [apiState, setApiState] = useState<"checking" | "online" | "offline">("checking");
   const [jobId, setJobId] = useState<string | null>(null);
   const [status, setStatus] = useState<"idle" | "queued" | "running" | "completed" | "failed" | "error">("idle");
   const [result, setResult] = useState<ReconResult | null>(null);
@@ -62,14 +65,27 @@ export default function Page() {
   const activePoll = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    void supabase.auth.getSession().then(({ data }) => {
+    const controller = new AbortController();
+    void fetch(`${API_BASE}/health`, { signal: controller.signal })
+      .then((response) => setApiState(response.ok ? "online" : "offline"))
+      .catch(() => setApiState("offline"));
+
+    if (!supabase) {
+      return () => {
+        controller.abort();
+        activePoll.current?.abort();
+      };
+    }
+
+    const authClient = supabase;
+    void authClient.auth.getSession().then(({ data }) => {
       const session = data.session;
       if (!session?.user.email) return;
       setAccessToken(session.access_token);
       setUser({ id: session.user.id, email: session.user.email });
       void fetchHistoryFromAPI(session.access_token);
     });
-    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: authListener } = authClient.auth.onAuthStateChange((_event, session) => {
       if (session?.user.email) {
         setAccessToken(session.access_token);
         setUser({ id: session.user.id, email: session.user.email });
@@ -80,6 +96,7 @@ export default function Page() {
     });
     return () => {
       activePoll.current?.abort();
+      controller.abort();
       authListener.subscription.unsubscribe();
     };
     // The API history loader is intentionally invoked only during session restoration.
@@ -109,6 +126,10 @@ export default function Page() {
   }
 
   async function submitAuth() {
+    if (!supabase) {
+      setError("Supabase authentication is not configured for this environment.");
+      return;
+    }
     if (!email.trim() || password.length < 10) return;
     setAuthLoading(true);
     setError(null);
@@ -122,6 +143,20 @@ export default function Page() {
         });
         if (signUpError) throw signUpError;
         setPassword("");
+
+        const accountAlreadyExists =
+          data.user &&
+          Array.isArray(data.user.identities) &&
+          data.user.identities.length === 0;
+
+        if (accountAlreadyExists) {
+          setAuthMode("login");
+          setAuthMessage(
+            "An account with this email already exists. Sign in with your password instead.",
+          );
+          return;
+        }
+
         if (!data.session) {
           setAuthMessage("Check your inbox and verify your email before signing in.");
           return;
@@ -148,7 +183,7 @@ export default function Page() {
 
   async function logout() {
     activePoll.current?.abort();
-    await supabase.auth.signOut();
+    await supabase?.auth.signOut();
     setAccessToken("");
     setUser(null);
     setHistory([]);
@@ -252,6 +287,26 @@ export default function Page() {
     void pollResults(item.jobId);
   }
 
+  function closeOperation() {
+    activePoll.current?.abort();
+    setDomain("");
+    setJobId(null);
+    setResult(null);
+    setError(null);
+    setStatus("idle");
+  }
+
+  function downloadReport() {
+    if (!result) return;
+    const blob = new Blob([JSON.stringify(result, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `cyberrecon-${result.domain}-${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
   const dns = result?.dns ?? {};
   const ip = result?.ip_info ?? {};
   const ports = result?.ports ?? [];
@@ -276,14 +331,14 @@ export default function Page() {
           <a href="#results">Intelligence</a>
         </nav>
         <div className="top-actions">
-          <span className="system-pill"><i /> API online</span>
+          <span className={`system-pill ${apiState}`}><i /> API {apiState}</span>
           {user ? (
             <div className="account-actions">
               <span className="account-email">{user.email}</span>
               <button className="secondary-button" onClick={logout}>Sign out</button>
             </div>
           ) : (
-            <button className="secondary-button" onClick={() => setShowAuth(true)}>Sign in</button>
+            <button className="secondary-button" onClick={() => setShowAuth(true)} disabled={!authConfigured}>Sign in</button>
           )}
         </div>
       </header>
@@ -292,7 +347,7 @@ export default function Page() {
         <aside className="settings-panel auth-panel" aria-label="Account access">
           <div><span className="eyebrow">Secure access</span><h2>{authMode === "login" ? "Sign in" : "Create account"}</h2></div>
           <button className="close-button" onClick={() => setShowAuth(false)} aria-label="Close account panel">×</button>
-          <p>Email verification is required before any account can run scans.</p>
+          <p>{authConfigured ? "Email verification is required before any account can run scans." : "Add the Supabase public URL and publishable key to frontend/.env.local, then restart the frontend."}</p>
           {authMessage && <div className="auth-message" role="status">{authMessage}</div>}
           <div className="auth-tabs" role="tablist" aria-label="Account action">
             <button className={authMode === "login" ? "active" : ""} onClick={() => setAuthMode("login")}>Sign in</button>
@@ -302,7 +357,7 @@ export default function Page() {
           <input id="account-email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" autoComplete="email" />
           <label htmlFor="account-password">Password</label>
           <input id="account-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void submitAuth(); }} placeholder="At least 10 characters" autoComplete={authMode === "login" ? "current-password" : "new-password"} />
-          <button className="primary-button full" onClick={submitAuth} disabled={authLoading || !email.trim() || password.length < 10}>
+          <button className="primary-button full" onClick={submitAuth} disabled={!authConfigured || authLoading || !email.trim() || password.length < 10}>
             {authLoading ? "Please wait…" : authMode === "login" ? "Sign in securely" : "Create account"}
           </button>
           <small className="auth-note">A real inbox is required. Limited to five authorized public-domain scans per hour.</small>
@@ -331,6 +386,8 @@ export default function Page() {
 
       {error && <div className="alert"><strong>Request interrupted</strong><span>{error}</span><button onClick={() => setError(null)}>×</button></div>}
 
+      {!authConfigured && <div className="configuration-notice" role="status"><strong>Local authentication setup required</strong><span>Supabase public configuration is missing. The dashboard is available for review, but account access and scans remain disabled until frontend/.env.local is configured.</span></div>}
+
       <section className="metrics-grid">
         <article><span className="metric-icon violet">◎</span><div><small>Total scans</small><strong>{history.length.toString().padStart(2, "0")}</strong><em>Last 20 retained</em></div></article>
         <article><span className="metric-icon green">✓</span><div><small>Completed</small><strong>{finished.toString().padStart(2, "0")}</strong><em>Results available</em></div></article>
@@ -356,7 +413,7 @@ export default function Page() {
         <section className="intel-panel" id="results">
           <div className="section-heading intel-heading">
             <div><span className="eyebrow">Current operation</span><h2>{result?.domain || domain || "Intelligence report"}</h2></div>
-            <div className="job-meta"><span className={`status-chip ${status}`}>{status === "running" && <i />}{status}</span>{jobId && <code>{jobId.slice(0, 8)}…</code>}</div>
+            <div className="job-meta"><span className={`status-chip ${status}`}>{status === "running" && <i />}{status}</span>{jobId && <code>{jobId.slice(0, 8)}…</code>}{result && <button className="operation-button" onClick={downloadReport}>Export JSON</button>}{(result || jobId) && <button className="operation-button danger" onClick={closeOperation}>Close operation</button>}</div>
           </div>
 
           {!result ? (

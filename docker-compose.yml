@@ -30,7 +30,7 @@ services:
       DATABASE_URL: postgresql+psycopg://cyberrecon:${POSTGRES_PASSWORD:-development-only}@postgres:5432/cyberrecon
       SCAN_API_KEY: ${SCAN_API_KEY:-local-development-key-change-me}
       SUPABASE_URL: ${SUPABASE_URL}
-      ALLOWED_ORIGINS: http://localhost:3000
+      ALLOWED_ORIGINS: http://localhost:3001,http://127.0.0.1:3001
       TASK_QUEUE_MODE: celery
       REDIS_URL: redis://redis:6379/0
       NMAP_PATH: nmap

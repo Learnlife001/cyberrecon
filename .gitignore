@@ -40,6 +40,7 @@ frontend/.next/
 
 # Environment variables
 frontend/.env.local
+frontend/.env*.local
 config/*.txt
 
 # Coverage
@@ -54,3 +55,5 @@ htmlcov/
 # Cursor
 .cursorindexingignore
 .cursorignore
+
+.vercel
