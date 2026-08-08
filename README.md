@@ -4,12 +4,23 @@ CyberRecon is a full-stack, asynchronous reconnaissance platform for security le
 
 > Only scan domains and systems that you own or are explicitly authorized to assess.
 
+## Live deployment
+
+- **Application:** [cgreglab.space](https://cgreglab.space)
+- **Frontend:** Next.js on Vercel
+- **API:** FastAPI on Render
+- **Authentication:** Supabase Auth with verified-email accounts
+- **Database:** PostgreSQL
+
+The production browser application uses Supabase access tokens; private scan API keys and database credentials are never shipped to the frontend.
+
 ## What it demonstrates
 
 - Automated DNS, WHOIS, IP, subdomain, port, and technology discovery
 - Durable background jobs with queued, running, completed, and failed states
 - Persistent scan history and structured results in PostgreSQL
 - Verified-email registration through Supabase Auth, short-lived JWT authentication, per-user authorization, and rate limiting
+- Live API health reporting, downloadable JSON reports, and explicit operation cleanup
 - Protection against scans of private, loopback, link-local, and reserved networks
 - Dockerized API, worker, PostgreSQL, and Redis services
 - Automated backend tests, frontend checks, dependency audits, and container builds
@@ -19,6 +30,8 @@ CyberRecon is a full-stack, asynchronous reconnaissance platform for security le
 ```mermaid
 flowchart LR
     U[Analyst] --> UI[Next.js dashboard]
+    U -->|register / sign in| AUTH[Supabase Auth]
+    AUTH -->|verified JWT| UI
     UI -->|Bearer JWT| API[FastAPI API]
     API --> DB[(PostgreSQL)]
     API --> Q[(Redis queue)]
@@ -30,7 +43,7 @@ flowchart LR
     UI -->|poll job status| API
 ```
 
-The API validates and queues each request. A separate Celery worker performs the reconnaissance and stores its results in PostgreSQL, so API restarts do not silently discard queued work. The dashboard polls the API and renders current status, intelligence panels, and scan history.
+The API validates and queues each request. In the Docker deployment, a separate Celery worker performs the reconnaissance and stores its results in PostgreSQL, so API restarts do not silently discard queued work. Production can use the simpler `inprocess` mode configured by the Render blueprint. The dashboard polls the API and renders current status, intelligence panels, and scan history.
 
 ## Technology stack
 
@@ -41,7 +54,7 @@ The API validates and queues each request. A separate Celery worker performs the
 | Jobs | Celery, Redis |
 | Data | PostgreSQL |
 | Recon | Nmap, DNS, WHOIS, IP intelligence |
-| Delivery | Docker Compose, GitHub Actions |
+| Delivery | Vercel, Render, Docker Compose, GitHub Actions |
 
 ## Run the production-style stack locally
 
@@ -66,10 +79,10 @@ The API is available at `http://localhost:8000`, with interactive documentation 
 Set-Location frontend
 Copy-Item .env.example .env.local
 npm install
-npm run dev
+npm run dev -- --port 3001
 ```
 
-Add the Supabase URL and publishable browser key to `frontend/.env.local`, then run `npm run dev -- --port 3001`. Open `http://localhost:3001`, register with a real email address, follow the confirmation link, and then sign in. The API key remains an administrative fallback and is never embedded in the browser application.
+Add the Supabase URL and publishable browser key to `frontend/.env.local`. Open `http://localhost:3001`, register with a real email address, follow the confirmation link, and then sign in. If the address is already registered, use **Sign in** instead of waiting for another confirmation message. The API key remains an administrative fallback and is never embedded in the browser application.
 
 If port 8000 is already occupied, set `API_PORT` in `.env`, for example `API_PORT=8002`.
 
@@ -88,7 +101,26 @@ The root `.env.example` documents all backend settings. The important production
 | `SCAN_RATE_LIMIT` | Maximum scan submissions per rate window |
 | `NMAP_PATH` | Optional explicit path to the Nmap executable |
 
-Secrets are loaded from the environment and must never be committed. `.env` files are excluded from both Git and Docker build context.
+The frontend uses these public build-time values:
+
+| Variable | Purpose |
+| --- | --- |
+| `NEXT_PUBLIC_API_URL` | Public HTTPS URL of the FastAPI service |
+| `NEXT_PUBLIC_SUPABASE_URL` | Public Supabase project URL |
+| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Supabase browser publishable key |
+
+`NEXT_PUBLIC_*` values are visible in the browser and must never contain service-role credentials. All private secrets are loaded from the backend environment and must never be committed. Local `.env` files and Vercel project metadata are excluded from Git, and environment files are excluded from the Docker build context.
+
+## Deployment
+
+The `main` branch is the production source branch. The frontend is linked to the Vercel `cyberrecon` project and is served through `cgreglab.space`. The backend configuration is declared in `render.yaml`, including the trusted production origins.
+
+Before deploying, configure the following in the provider dashboards:
+
+1. Set the three frontend `NEXT_PUBLIC_*` values in Vercel Production.
+2. Set the backend database, scan API key, Supabase URL, and allowed origins in Render.
+3. Configure confirmation-email SMTP credentials only in **Supabase Auth → Emails → SMTP Settings**.
+4. Deploy from `main`, then verify `/health`, account confirmation, sign-in, and an authorized scan.
 
 ## API workflow
 
