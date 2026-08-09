@@ -54,16 +54,7 @@ type ApiScanHistoryItem = {
   status?: unknown;
 };
 
-type AuthUser = { id: string; email: string; isAdmin: boolean };
-
-type AdminScan = {
-  job_id: string;
-  domain: string;
-  status: string;
-  created_at: string;
-  user_email: string;
-  phishing?: PhishingAssessment | null;
-};
+type AuthUser = { id: string; email: string };
 
 const API_BASE = (
   process.env.NODE_ENV === "development"
@@ -88,9 +79,6 @@ export default function Page() {
   const [authLoading, setAuthLoading] = useState(false);
   const [authMessage, setAuthMessage] = useState<string | null>(null);
   const [apiState, setApiState] = useState<"checking" | "online" | "offline">("checking");
-  const [showAdmin, setShowAdmin] = useState(false);
-  const [adminScans, setAdminScans] = useState<AdminScan[]>([]);
-  const [adminLoading, setAdminLoading] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [status, setStatus] = useState<"idle" | "queued" | "running" | "completed" | "failed" | "error">("idle");
   const [result, setResult] = useState<ReconResult | null>(null);
@@ -141,33 +129,8 @@ export default function Page() {
   }
 
   async function establishAccount(token: string, id: string, accountEmail: string) {
-    let isAdmin = false;
-    try {
-      const response = await fetch(`${API_BASE}/auth/me`, { headers: authHeaders(token) });
-      if (response.ok) {
-        const profile = (await response.json()) as { is_admin?: boolean };
-        isAdmin = Boolean(profile.is_admin);
-      }
-    } catch {
-      // The account can still use its own scan history if the profile request is unavailable.
-    }
-    setUser({ id, email: accountEmail, isAdmin });
+    setUser({ id, email: accountEmail });
     await fetchHistoryFromAPI(token);
-    if (isAdmin) await fetchAdminScans(token);
-  }
-
-  async function fetchAdminScans(token = accessToken) {
-    setAdminLoading(true);
-    try {
-      const response = await fetch(`${API_BASE}/admin/scans`, { headers: authHeaders(token) });
-      if (!response.ok) throw new Error(`Admin scan request failed with ${response.status}`);
-      const payload = (await response.json()) as AdminScan[];
-      setAdminScans(Array.isArray(payload) ? payload : []);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setAdminLoading(false);
-    }
   }
 
   async function fetchHistoryFromAPI(token = accessToken) {
@@ -249,8 +212,6 @@ export default function Page() {
     setAccessToken("");
     setUser(null);
     setHistory([]);
-    setAdminScans([]);
-    setShowAdmin(false);
     setResult(null);
     setJobId(null);
     setStatus("idle");
@@ -432,7 +393,6 @@ export default function Page() {
           {user ? (
             <div className="account-actions">
               <span className="account-email">{user.email}</span>
-              {user.isAdmin && <button className="secondary-button admin-button" onClick={() => setShowAdmin((current) => !current)}>{showAdmin ? "Dashboard" : "Admin"}</button>}
               <button className="secondary-button" onClick={logout}>Sign out</button>
             </div>
           ) : (
@@ -494,38 +454,6 @@ export default function Page() {
         <article><span className="metric-icon cyan">↻</span><div><small>Active jobs</small><strong>{active.toString().padStart(2, "0")}</strong><em>Polling every 3 sec</em></div></article>
         <article><span className="metric-icon amber">◈</span><div><small>Assets found</small><strong>{result ? subdomains.length + ports.length : 0}</strong><em>Current target</em></div></article>
       </section>
-
-      {showAdmin && user?.isAdmin && (
-        <section className="admin-console" aria-label="Administrator scan intelligence">
-          <div className="admin-heading">
-            <div><span className="eyebrow">Private oversight</span><h2>Public scan intelligence</h2><p>Review who scanned each domain and the evidence behind its automated phishing assessment.</p></div>
-            <button className="secondary-button" onClick={() => void fetchAdminScans()} disabled={adminLoading}>{adminLoading ? "Refreshing…" : "Refresh records"}</button>
-          </div>
-          <div className="admin-summary">
-            <article><small>Recorded scans</small><strong>{adminScans.length}</strong></article>
-            <article><small>Known / high risk</small><strong>{adminScans.filter((item) => item.phishing?.verdict === "known_phishing" || item.phishing?.verdict === "high_risk").length}</strong></article>
-            <article><small>Suspicious</small><strong>{adminScans.filter((item) => item.phishing?.verdict === "suspicious").length}</strong></article>
-            <article><small>Unique users</small><strong>{new Set(adminScans.map((item) => item.user_email)).size}</strong></article>
-          </div>
-          <div className="admin-table-wrap">
-            <table className="admin-table">
-              <thead><tr><th>User</th><th>Domain</th><th>Assessment</th><th>Score</th><th>Possible brand</th><th>Scanned</th></tr></thead>
-              <tbody>
-                {adminScans.length ? adminScans.map((item) => (
-                  <tr key={item.job_id}>
-                    <td>{item.user_email}</td>
-                    <td><button onClick={() => loadScan({ jobId: item.job_id, domain: item.domain, createdAt: item.created_at, status: item.status })}>{item.domain}</button></td>
-                    <td><span className={`verdict-chip ${item.phishing?.verdict || "unknown"}`}>{verdictLabel(item.phishing?.verdict)}</span></td>
-                    <td>{item.phishing ? `${item.phishing.risk_score}/100` : "—"}</td>
-                    <td>{item.phishing?.matched_brand || "—"}</td>
-                    <td>{new Date(item.created_at).toLocaleString()}</td>
-                  </tr>
-                )) : <tr><td colSpan={6} className="admin-empty">No stored scans have phishing assessments yet. Run a new scan to populate this view.</td></tr>}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
 
       <div className="workspace-grid">
         <aside className="history-panel" id="history">

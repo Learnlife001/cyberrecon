@@ -7,6 +7,7 @@ CyberRecon is a full-stack, asynchronous reconnaissance platform for security le
 ## Live deployment
 
 - **Application:** [cgreglab.space](https://cgreglab.space)
+- **Administration:** [admin.cgreglab.space](https://admin.cgreglab.space) (approved administrators only)
 - **Frontend:** Next.js on Vercel
 - **API:** FastAPI on Render
 - **Authentication:** Supabase Auth with verified-email accounts
@@ -32,9 +33,11 @@ The production browser application uses Supabase access tokens; private scan API
 ```mermaid
 flowchart LR
     U[Analyst] --> UI[Next.js dashboard]
+    A[Administrator] --> ADMIN[Separate Next.js admin console]
     U -->|register / sign in| AUTH[Supabase Auth]
     AUTH -->|verified JWT| UI
     UI -->|Bearer JWT| API[FastAPI API]
+    ADMIN -->|Bearer JWT plus admin role| API
     API --> DB[(PostgreSQL)]
     API --> Q[(Redis queue)]
     Q --> W[Celery worker]
@@ -45,13 +48,13 @@ flowchart LR
     UI -->|poll job status| API
 ```
 
-The API validates and queues each request. In the Docker deployment, a separate Celery worker performs the reconnaissance and stores its results in PostgreSQL, so API restarts do not silently discard queued work. Production can use the simpler `inprocess` mode configured by the Render blueprint. The dashboard polls the API and renders current status, intelligence panels, and scan history.
+The API validates and queues each request. In the Docker deployment, a separate Celery worker performs the reconnaissance and stores its results in PostgreSQL, so API restarts do not silently discard queued work. Production can use the simpler `inprocess` mode configured by the Render blueprint. The public dashboard polls the API and renders current status, intelligence panels, and the signed-in user's scan history. A separately deployed administrator application shows cross-user intelligence only after the API independently verifies the administrator role; no administrator interface or data-fetching code is shipped in the public bundle.
 
 ## Technology stack
 
 | Layer | Technologies |
 | --- | --- |
-| Frontend | Next.js, React, TypeScript, Tailwind CSS |
+| Frontends | Two isolated Next.js, React, and TypeScript applications |
 | API | Python, FastAPI, SQLAlchemy, Uvicorn |
 | Jobs | Celery, Redis |
 | Data | PostgreSQL |
@@ -86,6 +89,8 @@ npm run dev -- --port 3001
 
 Add the Supabase URL and publishable browser key to `frontend/.env.local`. Open `http://localhost:3001`, register with a real email address, follow the confirmation link, and then sign in. If the address is already registered, use **Sign in** instead of waiting for another confirmation message. The API key remains an administrative fallback and is never embedded in the browser application.
 
+To run the isolated administrator console, copy its `.env.example` to `.env.local`, set the same three public values, and run `npm run dev -- --port 3002` from `admin-frontend`. Only accounts listed in the backend `ADMIN_EMAILS` setting (or trusted JWT `app_metadata`) are admitted.
+
 If port 8000 is already occupied, set `API_PORT` in `.env`, for example `API_PORT=8002`.
 
 ## Configuration
@@ -117,11 +122,11 @@ The frontend uses these public build-time values:
 
 ## Deployment
 
-The `main` branch is the production source branch. The frontend is linked to the Vercel `cyberrecon` project and is served through `cgreglab.space`. The backend configuration is declared in `render.yaml`, including the trusted production origins.
+The `main` branch is the production source branch. The public frontend is linked to the Vercel `cyberrecon` project and served through `cgreglab.space`; the isolated `admin-frontend` is deployed as the separate `cyberrecon-admin` project through `admin.cgreglab.space`. The backend configuration is declared in `render.yaml`, including both trusted production origins.
 
 Before deploying, configure the following in the provider dashboards:
 
-1. Set the three frontend `NEXT_PUBLIC_*` values in Vercel Production.
+1. Set the three frontend `NEXT_PUBLIC_*` values in both Vercel projects.
 2. Set the backend database, scan API key, Supabase URL, allowed origins, administrator emails, and optional Google Web Risk key in Render.
 3. Configure confirmation-email SMTP credentials only in **Supabase Auth → Emails → SMTP Settings**.
 4. Deploy from `main`, then verify `/health`, account confirmation, sign-in, and an authorized scan.
@@ -153,6 +158,7 @@ Administrative automation may instead use the private `X-API-Key` value.
 - The API validates Supabase JWT signatures, issuer, audience, and expiration against the project's JWKS endpoint.
 - Scan results and history are restricted to their owning account.
 - Administrator access uses trusted JWT `app_metadata` or the server-only `ADMIN_EMAILS` allowlist, never editable user metadata.
+- The administrator UI is isolated in a separate deployment, is not linked from the public console, and is marked `noindex`/`nofollow`.
 - Website inspection is bounded, rejects private-network destinations and unsafe redirects, and never executes target JavaScript.
 - Scan creation is rate-limited per account, while Supabase applies authentication rate limits.
 - CORS is restricted through configured origins.
@@ -167,6 +173,9 @@ These controls reduce accidental misuse; they do not turn the application into a
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 .\.venv\Scripts\python.exe -m compileall -q api_server.py worker.py modules
 Set-Location frontend
+npm run lint
+npm run build
+Set-Location ..\admin-frontend
 npm run lint
 npm run build
 ```

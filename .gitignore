@@ -34,13 +34,17 @@ Thumbs.db
 # Node dependencies
 node_modules/
 frontend/node_modules/
+admin-frontend/node_modules/
 
 # Next.js build output
 frontend/.next/
+admin-frontend/.next/
 
 # Environment variables
 frontend/.env.local
 frontend/.env*.local
+admin-frontend/.env.local
+admin-frontend/.env*.local
 config/*.txt
 
 # Coverage
