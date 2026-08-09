@@ -1,4 +1,4 @@
-from modules import subdomains, ports, whois_lookup, tech_stack, dns_info, ip_info
+from modules import subdomains, ports, whois_lookup, tech_stack, dns_info, ip_info, phishing
 
 
 def run_recon(domain: str):
@@ -26,6 +26,9 @@ def run_recon(domain: str):
     print("Running tech stack detection...")
     tech_result = tech_stack.run(target)
 
+    print("Running phishing-risk analysis...")
+    phishing_result = phishing.analyze(target, whois_result)
+
     print("Recon completed")
 
     return {
@@ -36,6 +39,7 @@ def run_recon(domain: str):
         "ports": ports_result,
         "whois": whois_result,
         "technologies": tech_result,
+        "phishing": phishing_result,
     }
 
 

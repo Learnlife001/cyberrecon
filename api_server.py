@@ -179,6 +179,11 @@ DOMAIN_PATTERN = re.compile(
 )
 RATE_LIMIT = int(os.getenv("SCAN_RATE_LIMIT", "5"))
 RATE_WINDOW_SECONDS = int(os.getenv("SCAN_RATE_WINDOW_SECONDS", "3600"))
+ADMIN_EMAILS = {
+    email.strip().lower()
+    for email in os.getenv("ADMIN_EMAILS", "").split(",")
+    if email.strip()
+}
 rate_buckets: dict[str, deque[float]] = defaultdict(deque)
 rate_lock = threading.Lock()
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -216,6 +221,8 @@ def require_principal(
         )
         user_id = uuid.UUID(payload["sub"])
         email = str(payload["email"]).strip().lower()
+        app_metadata = payload.get("app_metadata") or {}
+        is_admin = app_metadata.get("role") == "admin" or email in ADMIN_EMAILS
     except (jwt.PyJWTError, KeyError, TypeError, ValueError) as exc:
         raise HTTPException(status_code=401, detail="Invalid or expired access token") from exc
 
@@ -233,7 +240,13 @@ def require_principal(
         elif user.email != email:
             user.email = email
             db.commit()
-        return Principal(user_id=user.id, email=user.email)
+        return Principal(user_id=user.id, email=user.email, is_admin=is_admin)
+
+
+def require_admin(principal: Principal = Depends(require_principal)) -> Principal:
+    if not principal.is_admin:
+        raise HTTPException(status_code=403, detail="Administrator access required")
+    return principal
 
 
 def normalize_domain(value: str) -> str:
@@ -465,6 +478,30 @@ def list_scans(principal: Principal = Depends(require_principal)):
                 "created_at": s.created_at,
             }
             for s in scans
+        ]
+
+
+@app.get("/admin/scans")
+def list_admin_scans(_: Principal = Depends(require_admin)):
+    with SessionLocal() as db:
+        rows = (
+            db.query(Scan, User, ScanResult)
+            .outerjoin(User, Scan.user_id == User.id)
+            .outerjoin(ScanResult, ScanResult.scan_id == Scan.id)
+            .order_by(Scan.created_at.desc())
+            .limit(100)
+            .all()
+        )
+        return [
+            {
+                "job_id": str(scan_row.id),
+                "domain": scan_row.domain,
+                "status": scan_row.status,
+                "created_at": scan_row.created_at,
+                "user_email": user.email if user else "administrative scan",
+                "phishing": (result.results or {}).get("phishing") if result else None,
+            }
+            for scan_row, user, result in rows
         ]
 
 

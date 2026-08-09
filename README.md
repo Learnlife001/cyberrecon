@@ -17,6 +17,8 @@ The production browser application uses Supabase access tokens; private scan API
 ## What it demonstrates
 
 - Automated DNS, WHOIS, IP, subdomain, port, and technology discovery
+- Explainable phishing-risk scoring with verified-brand comparison, bounded source inspection, and optional Google Web Risk intelligence
+- Protected administrator intelligence showing scanned domains, users, risk scores, evidence, and official-site guidance
 - Durable background jobs with queued, running, completed, and failed states
 - Persistent scan history and structured results in PostgreSQL
 - Verified-email registration through Supabase Auth, short-lived JWT authentication, per-user authorization, and rate limiting
@@ -53,7 +55,7 @@ The API validates and queues each request. In the Docker deployment, a separate 
 | API | Python, FastAPI, SQLAlchemy, Uvicorn |
 | Jobs | Celery, Redis |
 | Data | PostgreSQL |
-| Recon | Nmap, DNS, WHOIS, IP intelligence |
+| Recon | Nmap, DNS, RDAP/WHOIS, certificate transparency, IP and phishing intelligence |
 | Delivery | Vercel, Render, Docker Compose, GitHub Actions |
 
 ## Run the production-style stack locally
@@ -100,6 +102,8 @@ The root `.env.example` documents all backend settings. The important production
 | `ALLOWED_ORIGINS` | Comma-separated trusted frontend origins |
 | `SCAN_RATE_LIMIT` | Maximum scan submissions per rate window |
 | `NMAP_PATH` | Optional explicit path to the Nmap executable |
+| `GOOGLE_WEB_RISK_API_KEY` | Optional server-side reputation feed for known phishing and malware URLs |
+| `ADMIN_EMAILS` | Comma-separated verified accounts permitted to open the administrator dashboard |
 
 The frontend uses these public build-time values:
 
@@ -118,7 +122,7 @@ The `main` branch is the production source branch. The frontend is linked to the
 Before deploying, configure the following in the provider dashboards:
 
 1. Set the three frontend `NEXT_PUBLIC_*` values in Vercel Production.
-2. Set the backend database, scan API key, Supabase URL, and allowed origins in Render.
+2. Set the backend database, scan API key, Supabase URL, allowed origins, administrator emails, and optional Google Web Risk key in Render.
 3. Configure confirmation-email SMTP credentials only in **Supabase Auth → Emails → SMTP Settings**.
 4. Deploy from `main`, then verify `/health`, account confirmation, sign-in, and an authorized scan.
 
@@ -131,6 +135,7 @@ Before deploying, configure the following in the provider dashboards:
 5. `GET /results/{job_id}` reports `queued`, `running`, `completed`, or `failed` for scans owned by that user.
 6. `GET /scans` returns the authenticated user's persistent scan history.
 7. `GET /health` reports database health and the configured queue mode.
+8. `GET /admin/scans` gives configured administrators a cross-user scan and phishing-intelligence view.
 
 User-facing protected endpoints require:
 
@@ -147,6 +152,8 @@ Administrative automation may instead use the private `X-API-Key` value.
 - Passwords and email confirmation are handled by Supabase Auth and are never stored by the CyberRecon API.
 - The API validates Supabase JWT signatures, issuer, audience, and expiration against the project's JWKS endpoint.
 - Scan results and history are restricted to their owning account.
+- Administrator access uses trusted JWT `app_metadata` or the server-only `ADMIN_EMAILS` allowlist, never editable user metadata.
+- Website inspection is bounded, rejects private-network destinations and unsafe redirects, and never executes target JavaScript.
 - Scan creation is rate-limited per account, while Supabase applies authentication rate limits.
 - CORS is restricted through configured origins.
 - Containers run as an unprivileged application user.

@@ -20,3 +20,7 @@ services:
         value: inprocess
       - key: NMAP_PATH
         value: nmap
+      - key: ADMIN_EMAILS
+        value: ilearnlife23@gmail.com
+      - key: GOOGLE_WEB_RISK_API_KEY
+        sync: false

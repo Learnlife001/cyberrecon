@@ -16,6 +16,28 @@ type ReconResult = {
     emails?: string | string[] | null;
   };
   technologies?: string[];
+  phishing?: PhishingAssessment;
+};
+
+type PhishingSignal = {
+  code: string;
+  label: string;
+  severity: "low" | "medium" | "high" | "critical";
+  points: number;
+};
+
+type PhishingAssessment = {
+  verdict: "known_phishing" | "high_risk" | "suspicious" | "no_indicators" | "unknown";
+  risk_score: number;
+  confidence: string;
+  matched_brand?: string | null;
+  canonical_domain?: string | null;
+  official_url?: string | null;
+  domain_age_days?: number | null;
+  signals?: PhishingSignal[];
+  threat_sources?: { source: string; status: string; matched: boolean }[];
+  checked_at?: string;
+  disclaimer?: string;
 };
 
 type ScanHistoryItem = {
@@ -32,11 +54,20 @@ type ApiScanHistoryItem = {
   status?: unknown;
 };
 
-type AuthUser = { id: string; email: string };
+type AuthUser = { id: string; email: string; isAdmin: boolean };
+
+type AdminScan = {
+  job_id: string;
+  domain: string;
+  status: string;
+  created_at: string;
+  user_email: string;
+  phishing?: PhishingAssessment | null;
+};
 
 const API_BASE = (
   process.env.NODE_ENV === "development"
-    ? "http://localhost:8000"
+    ? "/backend"
     : process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 ).replace(/\/$/, "");
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -57,6 +88,9 @@ export default function Page() {
   const [authLoading, setAuthLoading] = useState(false);
   const [authMessage, setAuthMessage] = useState<string | null>(null);
   const [apiState, setApiState] = useState<"checking" | "online" | "offline">("checking");
+  const [showAdmin, setShowAdmin] = useState(false);
+  const [adminScans, setAdminScans] = useState<AdminScan[]>([]);
+  const [adminLoading, setAdminLoading] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [status, setStatus] = useState<"idle" | "queued" | "running" | "completed" | "failed" | "error">("idle");
   const [result, setResult] = useState<ReconResult | null>(null);
@@ -82,13 +116,12 @@ export default function Page() {
       const session = data.session;
       if (!session?.user.email) return;
       setAccessToken(session.access_token);
-      setUser({ id: session.user.id, email: session.user.email });
-      void fetchHistoryFromAPI(session.access_token);
+      void establishAccount(session.access_token, session.user.id, session.user.email);
     });
     const { data: authListener } = authClient.auth.onAuthStateChange((_event, session) => {
       if (session?.user.email) {
         setAccessToken(session.access_token);
-        setUser({ id: session.user.id, email: session.user.email });
+        void establishAccount(session.access_token, session.user.id, session.user.email);
       } else {
         setAccessToken("");
         setUser(null);
@@ -105,6 +138,36 @@ export default function Page() {
 
   function authHeaders(token = accessToken) {
     return { Authorization: `Bearer ${token}` };
+  }
+
+  async function establishAccount(token: string, id: string, accountEmail: string) {
+    let isAdmin = false;
+    try {
+      const response = await fetch(`${API_BASE}/auth/me`, { headers: authHeaders(token) });
+      if (response.ok) {
+        const profile = (await response.json()) as { is_admin?: boolean };
+        isAdmin = Boolean(profile.is_admin);
+      }
+    } catch {
+      // The account can still use its own scan history if the profile request is unavailable.
+    }
+    setUser({ id, email: accountEmail, isAdmin });
+    await fetchHistoryFromAPI(token);
+    if (isAdmin) await fetchAdminScans(token);
+  }
+
+  async function fetchAdminScans(token = accessToken) {
+    setAdminLoading(true);
+    try {
+      const response = await fetch(`${API_BASE}/admin/scans`, { headers: authHeaders(token) });
+      if (!response.ok) throw new Error(`Admin scan request failed with ${response.status}`);
+      const payload = (await response.json()) as AdminScan[];
+      setAdminScans(Array.isArray(payload) ? payload : []);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAdminLoading(false);
+    }
   }
 
   async function fetchHistoryFromAPI(token = accessToken) {
@@ -169,10 +232,9 @@ export default function Page() {
         if (signInError) throw signInError;
         if (!data.session || !data.user.email) throw new Error("Unable to establish a verified session");
         setAccessToken(data.session.access_token);
-        setUser({ id: data.user.id, email: data.user.email });
+        await establishAccount(data.session.access_token, data.user.id, data.user.email);
         setPassword("");
         setShowAuth(false);
-        await fetchHistoryFromAPI(data.session.access_token);
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -187,6 +249,8 @@ export default function Page() {
     setAccessToken("");
     setUser(null);
     setHistory([]);
+    setAdminScans([]);
+    setShowAdmin(false);
     setResult(null);
     setJobId(null);
     setStatus("idle");
@@ -296,6 +360,39 @@ export default function Page() {
     setStatus("idle");
   }
 
+  function loadPhishingDemo() {
+    activePoll.current?.abort();
+    setDomain("paypa1-secure-login.example");
+    setJobId("local-demo");
+    setError(null);
+    setStatus("completed");
+    setResult({
+      domain: "paypa1-secure-login.example",
+      dns: {},
+      ip_info: {},
+      subdomains: [],
+      ports: [],
+      technologies: [],
+      whois: {},
+      phishing: {
+        verdict: "suspicious",
+        risk_score: 44,
+        confidence: "medium",
+        matched_brand: "PayPal",
+        canonical_domain: "paypal.com",
+        official_url: "https://paypal.com",
+        signals: [
+          { code: "brand_lookalike", label: "Domain closely resembles PayPal", severity: "high", points: 35 },
+          { code: "suspicious_terms", label: "Contains urgent login or security language", severity: "medium", points: 9 },
+        ],
+        threat_sources: [{ source: "Google Web Risk", status: "not_configured", matched: false }],
+        checked_at: new Date().toISOString(),
+        disclaimer: "Automated risk assessment only. Verify suspicious domains through trusted security channels.",
+      },
+    });
+    window.setTimeout(() => document.getElementById("results")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+  }
+
   function downloadReport() {
     if (!result) return;
     const blob = new Blob([JSON.stringify(result, null, 2)], { type: "application/json" });
@@ -335,6 +432,7 @@ export default function Page() {
           {user ? (
             <div className="account-actions">
               <span className="account-email">{user.email}</span>
+              {user.isAdmin && <button className="secondary-button admin-button" onClick={() => setShowAdmin((current) => !current)}>{showAdmin ? "Dashboard" : "Admin"}</button>}
               <button className="secondary-button" onClick={logout}>Sign out</button>
             </div>
           ) : (
@@ -384,6 +482,8 @@ export default function Page() {
         </button>
       </section>
 
+      {process.env.NODE_ENV === "development" && <div className="demo-notice"><span>Local preview</span><p>Inspect the phishing warning safely with a fictional reserved domain.</p><button className="secondary-button" onClick={loadPhishingDemo}>View phishing demo</button></div>}
+
       {error && <div className="alert"><strong>Request interrupted</strong><span>{error}</span><button onClick={() => setError(null)}>×</button></div>}
 
       {!authConfigured && <div className="configuration-notice" role="status"><strong>Local authentication setup required</strong><span>Supabase public configuration is missing. The dashboard is available for review, but account access and scans remain disabled until frontend/.env.local is configured.</span></div>}
@@ -394,6 +494,38 @@ export default function Page() {
         <article><span className="metric-icon cyan">↻</span><div><small>Active jobs</small><strong>{active.toString().padStart(2, "0")}</strong><em>Polling every 3 sec</em></div></article>
         <article><span className="metric-icon amber">◈</span><div><small>Assets found</small><strong>{result ? subdomains.length + ports.length : 0}</strong><em>Current target</em></div></article>
       </section>
+
+      {showAdmin && user?.isAdmin && (
+        <section className="admin-console" aria-label="Administrator scan intelligence">
+          <div className="admin-heading">
+            <div><span className="eyebrow">Private oversight</span><h2>Public scan intelligence</h2><p>Review who scanned each domain and the evidence behind its automated phishing assessment.</p></div>
+            <button className="secondary-button" onClick={() => void fetchAdminScans()} disabled={adminLoading}>{adminLoading ? "Refreshing…" : "Refresh records"}</button>
+          </div>
+          <div className="admin-summary">
+            <article><small>Recorded scans</small><strong>{adminScans.length}</strong></article>
+            <article><small>Known / high risk</small><strong>{adminScans.filter((item) => item.phishing?.verdict === "known_phishing" || item.phishing?.verdict === "high_risk").length}</strong></article>
+            <article><small>Suspicious</small><strong>{adminScans.filter((item) => item.phishing?.verdict === "suspicious").length}</strong></article>
+            <article><small>Unique users</small><strong>{new Set(adminScans.map((item) => item.user_email)).size}</strong></article>
+          </div>
+          <div className="admin-table-wrap">
+            <table className="admin-table">
+              <thead><tr><th>User</th><th>Domain</th><th>Assessment</th><th>Score</th><th>Possible brand</th><th>Scanned</th></tr></thead>
+              <tbody>
+                {adminScans.length ? adminScans.map((item) => (
+                  <tr key={item.job_id}>
+                    <td>{item.user_email}</td>
+                    <td><button onClick={() => loadScan({ jobId: item.job_id, domain: item.domain, createdAt: item.created_at, status: item.status })}>{item.domain}</button></td>
+                    <td><span className={`verdict-chip ${item.phishing?.verdict || "unknown"}`}>{verdictLabel(item.phishing?.verdict)}</span></td>
+                    <td>{item.phishing ? `${item.phishing.risk_score}/100` : "—"}</td>
+                    <td>{item.phishing?.matched_brand || "—"}</td>
+                    <td>{new Date(item.created_at).toLocaleString()}</td>
+                  </tr>
+                )) : <tr><td colSpan={6} className="admin-empty">No stored scans have phishing assessments yet. Run a new scan to populate this view.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
 
       <div className="workspace-grid">
         <aside className="history-panel" id="history">
@@ -420,6 +552,27 @@ export default function Page() {
             <div className="empty-report"><div className="scan-orbit"><span>⌖</span><i /><b /></div><h3>{activeScan ? (status === "queued" ? "Waiting for a scan worker" : "Building intelligence profile") : "No report selected"}</h3><p>{activeScan ? (status === "queued" ? "The durable queue accepted this scan and will start it shortly." : "DNS, WHOIS, service and technology probes are running.") : "Launch a scan or choose a previous target to populate this workspace."}</p></div>
           ) : (
             <div className="report-grid">
+              {result.phishing && (
+                <article className={`report-card phishing-card wide-card ${result.phishing.verdict}`}>
+                  <CardHeader icon="!" label="Phishing risk assessment" count={`${result.phishing.risk_score}/100`} />
+                  <div className="phishing-overview">
+                    <div className="risk-gauge"><strong>{result.phishing.risk_score}</strong><span>risk score</span></div>
+                    <div className="risk-copy">
+                      <span className={`verdict-chip ${result.phishing.verdict}`}>{verdictLabel(result.phishing.verdict)}</span>
+                      <h3>{phishingHeadline(result.phishing)}</h3>
+                      <p>{phishingGuidance(result.phishing)}</p>
+                    </div>
+                  </div>
+                  {result.phishing.official_url && (
+                    <div className="official-site"><span>Verified official website</span><a href={result.phishing.official_url} target="_blank" rel="noreferrer">{result.phishing.official_url}</a><small>Open the verified address directly instead of continuing on a lookalike domain.</small></div>
+                  )}
+                  <div className="signal-list">
+                    {result.phishing.signals?.length ? result.phishing.signals.map((signal) => <div key={signal.code}><i className={signal.severity} /><span>{signal.label}</span><b>+{signal.points}</b></div>) : <div><i className="low" /><span>No deterministic phishing indicators were found.</span><b>0</b></div>}
+                  </div>
+                  <small className="risk-disclaimer">{result.phishing.disclaimer}</small>
+                </article>
+              )}
+
               <article className="report-card summary-card">
                 <CardHeader icon="⌖" label="Target profile" count="01" />
                 <div className="target-title"><span>{result.domain.slice(0, 2).toUpperCase()}</span><div><strong>{result.domain}</strong><small>{ip.org || "Organization unavailable"}</small></div></div>
@@ -475,4 +628,27 @@ function RecordList({ label, items }: { label: string; items?: string[] }) {
 
 function EmptyCard({ text }: { text: string }) {
   return <div className="empty-card"><span>∅</span><p>{text}</p></div>;
+}
+
+function verdictLabel(verdict?: PhishingAssessment["verdict"]) {
+  return ({
+    known_phishing: "Known phishing",
+    high_risk: "High risk",
+    suspicious: "Suspicious",
+    no_indicators: "No indicators",
+    unknown: "Not assessed",
+  } as const)[verdict || "unknown"];
+}
+
+function phishingHeadline(assessment: PhishingAssessment) {
+  if (assessment.matched_brand) return `Possible ${assessment.matched_brand} impersonation detected`;
+  if (assessment.verdict === "known_phishing") return "Threat intelligence identifies this website as unsafe";
+  if (assessment.verdict === "no_indicators") return "No phishing indicators were detected";
+  return "This domain deserves additional verification";
+}
+
+function phishingGuidance(assessment: PhishingAssessment) {
+  if (assessment.verdict === "known_phishing" || assessment.verdict === "high_risk") return "Do not enter passwords, payment details, recovery codes, or personal information on the scanned website.";
+  if (assessment.verdict === "suspicious") return "Verify the organization through a trusted source before opening the website or sharing sensitive information.";
+  return "A clean automated assessment is not a guarantee of safety. Continue to verify unexpected links independently.";
 }
