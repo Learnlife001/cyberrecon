@@ -118,6 +118,16 @@ class ApiSecurityTests(unittest.TestCase):
 
     @patch("modules.phishing._inspect_site")
     @patch("modules.phishing._google_web_risk")
+    def test_strong_brand_lookalike_stays_high_risk_when_site_blocks_inspection(self, web_risk, inspect_site):
+        web_risk.return_value = {"source": "google_web_risk", "status": "not_configured", "matched": False}
+        inspect_site.return_value = {"source": "site_metadata", "status": "unavailable", "matched": False, "searchable_text": ""}
+        result = phishing.analyze("spaceandtimeus.digital")
+        self.assertEqual(result["verdict"], "high_risk")
+        self.assertGreaterEqual(result["risk_score"], 60)
+        self.assertIn("brand_on_risky_tld", {signal["code"] for signal in result["signals"]})
+
+    @patch("modules.phishing._inspect_site")
+    @patch("modules.phishing._google_web_risk")
     def test_short_domain_does_not_match_brand_by_single_letter(self, web_risk, inspect_site):
         web_risk.return_value = {"source": "google_web_risk", "status": "not_configured", "matched": False}
         inspect_site.return_value = {"source": "site_metadata", "status": "checked", "matched": False, "title": "X", "searchable_text": ""}

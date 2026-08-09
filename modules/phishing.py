@@ -50,6 +50,7 @@ MAX_HTML_BYTES = 512_000
 MAX_SCRIPT_BYTES = 384_000
 MAX_SCRIPTS = 3
 USER_AGENT = "CyberRecon-Safety-Scanner/1.0 (+https://cgreglab.space)"
+HIGH_ABUSE_TLDS = {"click", "digital", "info", "live", "online", "shop", "site", "support", "top", "xyz"}
 
 
 def _first(value: Any) -> Any:
@@ -249,7 +250,11 @@ def analyze(domain: str, whois_result: dict[str, Any] | None = None) -> dict[str
 
     brand = _brand_match(normalized)
     if brand:
-        add_signal("brand_lookalike", f"Domain resembles {brand['brand']} but is not its verified domain.", "high", 35)
+        similarity_points = 45 if brand["similarity"] >= 0.9 else 35
+        add_signal("brand_lookalike", f"Domain resembles {brand['brand']} but is not its verified domain.", "high", similarity_points)
+        tld = normalized.rsplit(".", 1)[-1]
+        if tld in HIGH_ABUSE_TLDS:
+            add_signal("brand_on_risky_tld", f"The apparent brand uses the .{tld} suffix instead of its verified domain.", "medium", 15)
 
     labels = set(re.split(r"[.-]", normalized))
     found_terms = sorted(labels.intersection(SUSPICIOUS_TERMS))
