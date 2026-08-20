@@ -24,6 +24,7 @@ The production browser application uses Supabase access tokens; private scan API
 - Persistent scan history and structured results in PostgreSQL
 - Verified-email registration through Supabase Auth, short-lived JWT authentication, per-user authorization, and rate limiting
 - Live API health reporting, downloadable JSON reports, and explicit operation cleanup
+- Branded transactional security alerts through Resend with a protected delivery test
 - Protection against scans of private, loopback, link-local, and reserved networks
 - Dockerized API, worker, PostgreSQL, and Redis services
 - Automated backend tests, frontend checks, dependency audits, and container builds
@@ -39,6 +40,7 @@ flowchart LR
     UI -->|Bearer JWT| API[FastAPI API]
     ADMIN -->|Bearer JWT plus admin role| API
     API --> DB[(PostgreSQL)]
+    API --> EMAIL[Resend transactional alerts]
     API --> Q[(Redis queue)]
     Q --> W[Celery worker]
     W --> R[Recon modules]
@@ -59,7 +61,7 @@ The API validates and queues each request. In the Docker deployment, a separate 
 | Jobs | Celery, Redis |
 | Data | PostgreSQL |
 | Recon | Nmap, DNS, RDAP/WHOIS, certificate transparency, IP and phishing intelligence |
-| Delivery | Vercel, Render, Docker Compose, GitHub Actions |
+| Delivery | Vercel, Render, Resend, Docker Compose, GitHub Actions |
 
 ## Run the production-style stack locally
 
@@ -109,6 +111,11 @@ The root `.env.example` documents all backend settings. The important production
 | `NMAP_PATH` | Optional explicit path to the Nmap executable |
 | `GOOGLE_WEB_RISK_API_KEY` | Optional server-side reputation feed for known phishing and malware URLs |
 | `ADMIN_EMAILS` | Comma-separated verified accounts permitted to open the administrator dashboard |
+| `RESEND_API_KEY` | Server-only Resend credential used to deliver transactional alerts |
+| `ALERT_FROM_EMAIL` | Verified branded sender, including its display name |
+| `ALERT_RECIPIENT_EMAIL` | Fixed recipient for the protected delivery test |
+| `SUPPORT_EMAIL` | Reply-to address shown on alert messages |
+| `PUBLIC_APP_URL` | HTTPS destination used by alert action buttons |
 
 The frontend uses these public build-time values:
 
@@ -127,7 +134,7 @@ The `main` branch is the production source branch. The public frontend is linked
 Before deploying, configure the following in the provider dashboards:
 
 1. Set the three frontend `NEXT_PUBLIC_*` values in both Vercel projects.
-2. Set the backend database, scan API key, Supabase URL, allowed origins, administrator emails, and optional Google Web Risk key in Render.
+2. Set the backend database, scan API key, Supabase URL, allowed origins, administrator emails, Resend API key, alert email settings, and optional Google Web Risk key in Render.
 3. Configure confirmation-email SMTP credentials only in **Supabase Auth → Emails → SMTP Settings**.
 4. Deploy from `main`, then verify `/health`, account confirmation, sign-in, and an authorized scan.
 
@@ -141,6 +148,7 @@ Before deploying, configure the following in the provider dashboards:
 6. `GET /scans` returns the authenticated user's persistent scan history.
 7. `GET /health` reports database health and the configured queue mode.
 8. `GET /admin/scans` gives configured administrators a cross-user scan and phishing-intelligence view.
+9. `POST /admin/alerts/test` sends a branded operational test to the fixed configured recipient; administrator authentication is required.
 
 User-facing protected endpoints require:
 
@@ -158,6 +166,7 @@ Administrative automation may instead use the private `X-API-Key` value.
 - The API validates Supabase JWT signatures, issuer, audience, and expiration against the project's JWKS endpoint.
 - Scan results and history are restricted to their owning account.
 - Administrator access uses trusted JWT `app_metadata` or the server-only `ADMIN_EMAILS` allowlist, never editable user metadata.
+- The Resend credential remains server-only; the test-email route is administrator-only, rate-limited, and cannot accept an arbitrary recipient.
 - The administrator UI is isolated in a separate deployment, is not linked from the public console, and is marked `noindex`/`nofollow`.
 - Website inspection is bounded, rejects private-network destinations and unsafe redirects, and never executes target JavaScript.
 - Scan creation is rate-limited per account, while Supabase applies authentication rate limits.
@@ -165,7 +174,7 @@ Administrative automation may instead use the private `X-API-Key` value.
 - Containers run as an unprivileged application user.
 - CI runs unit tests, Bandit, pip-audit, frontend lint/build/audit, and a Docker build.
 
-These controls reduce accidental misuse; they do not turn the application into a commercial scanning service. Larger deployments should add custom SMTP delivery, multi-factor authentication, distributed rate limiting, audit logging, monitoring, and explicit authorization records.
+These controls reduce accidental misuse; they do not turn the application into a commercial scanning service. Larger deployments should add event-triggered alert rules, multi-factor authentication, distributed rate limiting, audit logging, monitoring, and explicit authorization records.
 
 ## Development checks
 

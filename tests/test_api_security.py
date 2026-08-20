@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials
 
 
@@ -16,7 +16,7 @@ os.environ.setdefault("TASK_QUEUE_MODE", "inprocess")
 
 import api_server
 import worker
-from modules import phishing, ports, subdomains, tech_stack, whois_lookup
+from modules import email_alerts, phishing, ports, subdomains, tech_stack, whois_lookup
 
 
 class ApiSecurityTests(unittest.TestCase):
@@ -66,6 +66,123 @@ class ApiSecurityTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as context:
             api_server.require_admin(api_server.Principal(user_id=None, email="user@example.com"))
         self.assertEqual(context.exception.status_code, 403)
+
+    def test_alert_template_escapes_dynamic_content(self):
+        html_body, text_body = email_alerts.render_alert_email(
+            title="<script>alert(1)</script>",
+            introduction="Unsafe <b>message</b>",
+            details={"Target": "<example.test>"},
+            action_url="https://cgreglab.space",
+        )
+
+        self.assertNotIn("<script>", html_body)
+        self.assertIn("&lt;script&gt;", html_body)
+        self.assertIn("Unsafe &lt;b&gt;message&lt;/b&gt;", html_body)
+        self.assertIn("- Target: <example.test>", text_body)
+
+    @patch("modules.email_alerts.requests.post")
+    def test_alert_delivery_uses_resend_server_side(self, post):
+        response = post.return_value
+        response.status_code = 200
+        response.headers = {}
+        response.json.return_value = {"id": "email-test-id"}
+
+        delivery = email_alerts.send_alert_email(
+            recipient="support@cgreglab.space",
+            subject="CyberRecon test",
+            title="Delivery test",
+            introduction="The alert channel is operational.",
+            api_key="re_unit_test",
+            sender="CyberRecon by CGregLab Security <alerts@cgreglab.space>",
+            reply_to="support@cgreglab.space",
+            idempotency_key="unit-test-delivery",
+        )
+
+        self.assertEqual(post.call_args.args[0], email_alerts.RESEND_EMAILS_URL)
+        request_options = post.call_args.kwargs
+        self.assertEqual(
+            request_options["headers"]["Authorization"], "Bearer re_unit_test"
+        )
+        self.assertEqual(
+            request_options["headers"]["Idempotency-Key"], "unit-test-delivery"
+        )
+        self.assertEqual(request_options["json"]["to"], ["support@cgreglab.space"])
+        self.assertEqual(request_options["json"]["reply_to"], "support@cgreglab.space")
+        self.assertEqual(delivery.message_id, "email-test-id")
+
+    @patch.dict(os.environ, {"RESEND_API_KEY": ""}, clear=False)
+    def test_alert_delivery_requires_server_key(self):
+        with self.assertRaises(email_alerts.EmailConfigurationError):
+            email_alerts.send_alert_email(
+                recipient="support@cgreglab.space",
+                subject="CyberRecon test",
+                title="Delivery test",
+                introduction="The alert channel is operational.",
+            )
+
+    @patch("api_server.send_alert_email")
+    def test_admin_alert_route_uses_fixed_recipient(self, send_email):
+        send_email.return_value = email_alerts.EmailDelivery(
+            message_id="email-route-test",
+            recipient="support@cgreglab.space",
+        )
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/admin/alerts/test",
+                "headers": [],
+                "client": ("203.0.113.72", 1234),
+                "server": ("testserver", 80),
+                "scheme": "http",
+                "query_string": b"",
+            }
+        )
+
+        response = api_server.send_test_alert(
+            request,
+            api_server.Principal(user_id=None, email="admin@example.com", is_admin=True),
+        )
+
+        self.assertEqual(response.status, "sent")
+        self.assertEqual(response.message_id, "email-route-test")
+        self.assertEqual(
+            send_email.call_args.kwargs["recipient"], api_server.ALERT_RECIPIENT_EMAIL
+        )
+        self.assertTrue(
+            send_email.call_args.kwargs["idempotency_key"].startswith(
+                "cyberrecon-alert-test-"
+            )
+        )
+
+    @patch("api_server.send_alert_email")
+    def test_admin_alert_route_hides_provider_error(self, send_email):
+        send_email.side_effect = email_alerts.EmailDeliveryError(
+            "Provider response should remain private"
+        )
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/admin/alerts/test",
+                "headers": [],
+                "client": ("203.0.113.73", 1234),
+                "server": ("testserver", 80),
+                "scheme": "http",
+                "query_string": b"",
+            }
+        )
+
+        with self.assertRaises(HTTPException) as context:
+            api_server.send_test_alert(
+                request,
+                api_server.Principal(
+                    user_id=None, email="admin@example.com", is_admin=True
+                ),
+            )
+
+        self.assertEqual(context.exception.status_code, 502)
+        self.assertEqual(context.exception.detail, "Unable to send the test alert")
 
     @patch("modules.phishing._inspect_site")
     @patch("modules.phishing._google_web_risk")

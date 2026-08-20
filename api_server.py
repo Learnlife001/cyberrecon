@@ -30,6 +30,11 @@ except ImportError:  # Celery is optional for local in-process development.
     Celery = None
 
 from main import run_recon
+from modules.email_alerts import (
+    EmailConfigurationError,
+    EmailDeliveryError,
+    send_alert_email,
+)
 
 load_dotenv()
 
@@ -38,6 +43,10 @@ SCAN_API_KEY = os.getenv("SCAN_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 TASK_QUEUE_MODE = os.getenv("TASK_QUEUE_MODE", "inprocess").strip().lower()
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+ALERT_RECIPIENT_EMAIL = os.getenv(
+    "ALERT_RECIPIENT_EMAIL", "support@cgreglab.space"
+).strip()
+PUBLIC_APP_URL = os.getenv("PUBLIC_APP_URL", "https://cgreglab.space").rstrip("/")
 
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is not set")
@@ -349,6 +358,13 @@ class ScanRequest(BaseModel):
     domain: str
 
 
+class TestAlertResponse(BaseModel):
+    status: str
+    provider: str
+    message_id: str
+    recipient: str
+
+
 @app.get("/auth/me")
 def auth_me(principal: Principal = Depends(require_principal)):
     if principal.is_admin:
@@ -503,6 +519,56 @@ def list_admin_scans(_: Principal = Depends(require_admin)):
             }
             for scan_row, user, result in rows
         ]
+
+
+@app.post("/admin/alerts/test", response_model=TestAlertResponse)
+def send_test_alert(
+    http_request: Request,
+    _: Principal = Depends(require_admin),
+):
+    """Send a fixed-recipient delivery test without exposing a public mail relay."""
+
+    enforce_rate_limit(http_request, scope="alert test")
+    generated_at = datetime.now(timezone.utc)
+
+    try:
+        delivery = send_alert_email(
+            recipient=ALERT_RECIPIENT_EMAIL,
+            subject="CyberRecon alert system test",
+            title="Alert delivery is operational",
+            introduction=(
+                "CyberRecon successfully reached the configured email delivery provider. "
+                "This confirms that security notifications can be delivered from the "
+                "production API."
+            ),
+            severity="operational",
+            details={
+                "Environment": os.getenv("APP_ENVIRONMENT", "production"),
+                "API service": "cyberrecon-api-3ams",
+                "Authorization": "Administrator-only test route",
+                "Generated at": generated_at.strftime("%Y-%m-%d %H:%M UTC"),
+            },
+            action_url=PUBLIC_APP_URL,
+            action_label="Open CyberRecon",
+            idempotency_key=f"cyberrecon-alert-test-{generated_at:%Y%m%d%H%M}",
+        )
+    except EmailConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except EmailDeliveryError as exc:
+        logger.warning("Test alert delivery failed: %s", exc)
+        raise HTTPException(status_code=502, detail="Unable to send the test alert") from exc
+
+    logger.info(
+        "Test alert accepted by %s with message id %s",
+        delivery.provider,
+        delivery.message_id,
+    )
+    return TestAlertResponse(
+        status="sent",
+        provider=delivery.provider,
+        message_id=delivery.message_id,
+        recipient=delivery.recipient,
+    )
 
 
 @app.get("/health")

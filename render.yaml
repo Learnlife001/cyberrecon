@@ -24,3 +24,15 @@ services:
         value: ilearnlife23@gmail.com
       - key: GOOGLE_WEB_RISK_API_KEY
         sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: ALERT_FROM_EMAIL
+        value: "CyberRecon by CGregLab Security <alerts@cgreglab.space>"
+      - key: ALERT_RECIPIENT_EMAIL
+        value: support@cgreglab.space
+      - key: SUPPORT_EMAIL
+        value: support@cgreglab.space
+      - key: PUBLIC_APP_URL
+        value: https://cgreglab.space
+      - key: APP_ENVIRONMENT
+        value: production
