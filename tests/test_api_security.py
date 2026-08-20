@@ -1,5 +1,6 @@
 import os
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from fastapi import HTTPException, Request
@@ -16,7 +17,15 @@ os.environ.setdefault("TASK_QUEUE_MODE", "inprocess")
 
 import api_server
 import worker
-from modules import email_alerts, phishing, ports, subdomains, tech_stack, whois_lookup
+from modules import (
+    email_alerts,
+    phishing,
+    ports,
+    scan_alerts,
+    subdomains,
+    tech_stack,
+    whois_lookup,
+)
 
 
 class ApiSecurityTests(unittest.TestCase):
@@ -66,6 +75,118 @@ class ApiSecurityTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as context:
             api_server.require_admin(api_server.Principal(user_id=None, email="user@example.com"))
         self.assertEqual(context.exception.status_code, 403)
+
+    def test_api_key_principal_cannot_create_user_monitor(self):
+        with self.assertRaises(HTTPException) as context:
+            api_server.require_account(api_server.Principal(is_admin=True))
+        self.assertEqual(context.exception.status_code, 403)
+
+    def test_monitor_cadence_calculates_next_run(self):
+        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+        self.assertEqual(api_server.next_monitor_run("daily", now), now + timedelta(days=1))
+        self.assertEqual(
+            api_server.next_monitor_run("weekly", now), now + timedelta(days=7)
+        )
+
+    def test_high_risk_scan_builds_critical_phishing_warning(self):
+        result = {
+            "ports": [],
+            "subdomains": [],
+            "technologies": ["Cloudflare"],
+            "phishing": {
+                "verdict": "high_risk",
+                "risk_score": 82,
+                "official_url": "https://example.com",
+            },
+        }
+
+        alert = scan_alerts.build_scan_alert(domain="example-login.test", result=result)
+
+        self.assertEqual(alert.severity, "critical")
+        self.assertIn("phishing warning", alert.subject.lower())
+        self.assertEqual(alert.details["Likely official website"], "https://example.com")
+
+    def test_posture_changes_take_priority_over_completion_notice(self):
+        previous = {
+            "ports": [{"port": 443, "protocol": "tcp", "service": "https"}],
+            "subdomains": ["www.example.com"],
+            "technologies": ["Cloudflare"],
+            "dns": {"A": ["93.184.216.34"]},
+            "ip_info": {"ip": "93.184.216.34"},
+            "phishing": {"verdict": "no_indicators", "risk_score": 0},
+        }
+        current = {
+            **previous,
+            "ports": [
+                {"port": 443, "protocol": "tcp", "service": "https"},
+                {"port": 22, "protocol": "tcp", "service": "ssh"},
+            ],
+            "technologies": ["Cloudflare", "Next.js"],
+        }
+
+        alert = scan_alerts.build_scan_alert(
+            domain="example.com",
+            result=current,
+            previous_result=previous,
+        )
+
+        self.assertEqual(alert.severity, "warning")
+        self.assertIn("posture changed", alert.subject.lower())
+        self.assertTrue(
+            any("22/tcp" in str(value) for value in alert.details.values())
+        )
+
+    def test_unchanged_scheduled_scan_builds_report_notice(self):
+        result = {
+            "ports": [],
+            "subdomains": [],
+            "technologies": [],
+            "phishing": {"verdict": "no_indicators", "risk_score": 0},
+        }
+
+        alert = scan_alerts.build_scan_alert(
+            domain="example.com",
+            result=result,
+            previous_result=result,
+            source="scheduled_weekly",
+        )
+
+        self.assertEqual(alert.severity, "operational")
+        self.assertIn("scheduled cyberrecon report", alert.subject.lower())
+        self.assertEqual(alert.details["Scan type"], "Scheduled weekly monitoring")
+
+    @patch("api_server.send_alert_email")
+    def test_completed_scan_dispatches_one_idempotent_alert(self, send_email):
+        send_email.return_value = email_alerts.EmailDelivery(
+            message_id="scan-alert-test",
+            recipient="user@example.com",
+        )
+
+        api_server._deliver_scan_alert(
+            job_id="11111111-1111-1111-1111-111111111111",
+            domain="example.com",
+            source="manual",
+            recipient="user@example.com",
+            result={
+                "ports": [],
+                "subdomains": [],
+                "technologies": [],
+                "phishing": {"verdict": "no_indicators", "risk_score": 0},
+            },
+            previous_result=None,
+        )
+
+        send_email.assert_called_once()
+        self.assertEqual(
+            send_email.call_args.kwargs["idempotency_key"],
+            "cyberrecon-scan-11111111-1111-1111-1111-111111111111",
+        )
+
+    def test_monitoring_routes_are_exposed_in_openapi(self):
+        paths = api_server.app.openapi()["paths"]
+        self.assertIn("/monitors", paths)
+        self.assertIn("/monitors/{monitor_id}", paths)
+        self.assertIn("/admin/monitoring/run-due", paths)
 
     def test_alert_template_escapes_dynamic_content(self):
         html_body, text_body = email_alerts.render_alert_email(

@@ -36,3 +36,9 @@ services:
         value: https://cgreglab.space
       - key: APP_ENVIRONMENT
         value: production
+      - key: SCAN_ALERTS_ENABLED
+        value: true
+      - key: MAX_MONITORS_PER_USER
+        value: 5
+      - key: MAX_SCHEDULED_SCANS_PER_RUN
+        value: 25

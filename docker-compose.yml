@@ -34,6 +34,15 @@ services:
       TASK_QUEUE_MODE: celery
       REDIS_URL: redis://redis:6379/0
       NMAP_PATH: nmap
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      ALERT_FROM_EMAIL: ${ALERT_FROM_EMAIL:-CyberRecon by CGregLab Security <alerts@cgreglab.space>}
+      ALERT_RECIPIENT_EMAIL: ${ALERT_RECIPIENT_EMAIL:-support@cgreglab.space}
+      SUPPORT_EMAIL: ${SUPPORT_EMAIL:-support@cgreglab.space}
+      PUBLIC_APP_URL: ${PUBLIC_APP_URL:-https://cgreglab.space}
+      APP_ENVIRONMENT: ${APP_ENVIRONMENT:-development}
+      SCAN_ALERTS_ENABLED: ${SCAN_ALERTS_ENABLED:-true}
+      MAX_MONITORS_PER_USER: ${MAX_MONITORS_PER_USER:-5}
+      MAX_SCHEDULED_SCANS_PER_RUN: ${MAX_SCHEDULED_SCANS_PER_RUN:-25}
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on:

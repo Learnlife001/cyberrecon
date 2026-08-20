@@ -11,6 +11,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
+from typing import Literal
 
 import jwt
 from jwt import PyJWKClient
@@ -20,8 +21,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from sqlalchemy import DateTime, ForeignKey, String, create_engine, func, text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    UniqueConstraint,
+    create_engine,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID as SA_UUID
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 try:
@@ -35,6 +48,7 @@ from modules.email_alerts import (
     EmailDeliveryError,
     send_alert_email,
 )
+from modules.scan_alerts import build_scan_alert
 
 load_dotenv()
 
@@ -47,6 +61,13 @@ ALERT_RECIPIENT_EMAIL = os.getenv(
     "ALERT_RECIPIENT_EMAIL", "support@cgreglab.space"
 ).strip()
 PUBLIC_APP_URL = os.getenv("PUBLIC_APP_URL", "https://cgreglab.space").rstrip("/")
+SCAN_ALERTS_ENABLED = os.getenv("SCAN_ALERTS_ENABLED", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
+MAX_MONITORS_PER_USER = int(os.getenv("MAX_MONITORS_PER_USER", "5"))
+MAX_SCHEDULED_SCANS_PER_RUN = int(os.getenv("MAX_SCHEDULED_SCANS_PER_RUN", "25"))
 
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is not set")
@@ -81,7 +102,26 @@ async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE scans ADD COLUMN IF NOT EXISTS user_id UUID"))
+        connection.execute(
+            text(
+                "ALTER TABLE scans ADD COLUMN IF NOT EXISTS "
+                "source VARCHAR(24) NOT NULL DEFAULT 'manual'"
+            )
+        )
         connection.execute(text("ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL"))
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_scans_user_domain_created "
+                "ON scans (user_id, domain, created_at DESC)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_scan_results_scan_id "
+                "ON scan_results (scan_id)"
+            )
+        )
+        connection.execute(text("ALTER TABLE domain_monitors ENABLE ROW LEVEL SECURITY"))
     if TASK_QUEUE_MODE == "inprocess":
         with SessionLocal() as db:
             db.query(Scan).filter(Scan.status == "running").update(
@@ -103,7 +143,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )
 
@@ -128,6 +168,9 @@ class User(Base):
 
 class Scan(Base):
     __tablename__ = "scans"
+    __table_args__ = (
+        Index("ix_scans_user_domain_created", "user_id", "domain", "created_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         SA_UUID(as_uuid=True),
@@ -147,6 +190,13 @@ class Scan(Base):
         default="running"
     )
 
+    source: Mapped[str] = mapped_column(
+        String(24),
+        nullable=False,
+        default="manual",
+        server_default="manual",
+    )
+
     created_at: Mapped[object] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -156,6 +206,7 @@ class Scan(Base):
 
 class ScanResult(Base):
     __tablename__ = "scan_results"
+    __table_args__ = (Index("ix_scan_results_scan_id", "scan_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         SA_UUID(as_uuid=True),
@@ -175,6 +226,46 @@ class ScanResult(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now()
+    )
+
+
+class DomainMonitor(Base):
+    __tablename__ = "domain_monitors"
+    __table_args__ = (
+        UniqueConstraint("user_id", "domain", name="uq_domain_monitors_user_domain"),
+        CheckConstraint(
+            "cadence IN ('daily', 'weekly')",
+            name="ck_domain_monitors_cadence",
+        ),
+        Index("ix_domain_monitors_due", "enabled", "next_run_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        SA_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        SA_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    domain: Mapped[str] = mapped_column(String(253), nullable=False)
+    cadence: Mapped[str] = mapped_column(String(16), nullable=False)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="true",
+    )
+    next_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
     )
 
 
@@ -258,6 +349,12 @@ def require_admin(principal: Principal = Depends(require_principal)) -> Principa
     return principal
 
 
+def require_account(principal: Principal = Depends(require_principal)) -> Principal:
+    if principal.user_id is None or not principal.email:
+        raise HTTPException(status_code=403, detail="Verified user account required")
+    return principal
+
+
 def normalize_domain(value: str) -> str:
     return value.lower().strip().removeprefix("https://").removeprefix("http://").rstrip("/")
 
@@ -303,6 +400,78 @@ def enforce_user_rate_limit(user_id: uuid.UUID) -> None:
         )
 
 
+def next_monitor_run(cadence: str, reference: datetime | None = None) -> datetime:
+    current = reference or datetime.now(timezone.utc)
+    if cadence == "daily":
+        return current + timedelta(days=1)
+    if cadence == "weekly":
+        return current + timedelta(days=7)
+    raise ValueError("Unsupported monitoring cadence")
+
+
+def _dispatch_scan_job(
+    job_id: str,
+    domain: str,
+    background_tasks: BackgroundTasks,
+) -> None:
+    if TASK_QUEUE_MODE == "celery":
+        try:
+            celery_client.send_task("cyberrecon.run_scan", args=[job_id, domain])
+            return
+        except Exception as exc:
+            logger.exception("Unable to queue scan %s", job_id)
+            with SessionLocal() as db:
+                scan_row = db.get(Scan, uuid.UUID(job_id))
+                if scan_row is not None:
+                    scan_row.status = "failed"
+                    db.commit()
+            raise HTTPException(status_code=503, detail="Scan queue is unavailable") from exc
+
+    background_tasks.add_task(_run_scan_job, job_id, domain)
+
+
+def _deliver_scan_alert(
+    *,
+    job_id: str,
+    domain: str,
+    source: str,
+    recipient: str,
+    result: dict,
+    previous_result: dict | None,
+) -> None:
+    if not SCAN_ALERTS_ENABLED:
+        return
+
+    try:
+        content = build_scan_alert(
+            domain=domain,
+            result=result,
+            previous_result=previous_result,
+            source=source,
+        )
+        delivery = send_alert_email(
+            recipient=recipient,
+            subject=content.subject,
+            title=content.title,
+            introduction=content.introduction,
+            severity=content.severity,
+            details=content.details,
+            action_url=PUBLIC_APP_URL,
+            action_label=content.action_label,
+            idempotency_key=f"cyberrecon-scan-{job_id}",
+        )
+        logger.info(
+            "Scan alert accepted by %s for job %s with message id %s",
+            delivery.provider,
+            job_id,
+            delivery.message_id,
+        )
+    except (EmailConfigurationError, EmailDeliveryError) as exc:
+        logger.warning("Scan %s completed but its alert was not delivered: %s", job_id, exc)
+    except Exception:
+        logger.exception("Unexpected alert failure for completed scan %s", job_id)
+
+
 def _run_scan_job(job_id: str, domain: str):
 
     scan_uuid = uuid.UUID(job_id)
@@ -332,30 +501,59 @@ def _run_scan_job(job_id: str, domain: str):
 
         logger.exception("Scan failed %s", job_id)
 
+    alert_payload = None
     with SessionLocal() as db:
-
         scan = db.get(Scan, scan_uuid)
-
         if scan is not None:
             scan.status = status
 
-        if status == "completed" and result is not None:
-
+        if scan is not None and status == "completed" and result is not None:
             safe_result = json.loads(json.dumps(result, default=str))
-
-            db.add(
-                ScanResult(
-                    scan_id=scan_uuid,
-                    results=safe_result
+            previous_query = (
+                db.query(ScanResult)
+                .join(Scan, ScanResult.scan_id == Scan.id)
+                .filter(
+                    Scan.id != scan_uuid,
+                    Scan.domain == scan.domain,
+                    Scan.status == "completed",
                 )
             )
+            if scan.user_id is None:
+                previous_query = previous_query.filter(Scan.user_id.is_(None))
+                recipient = ALERT_RECIPIENT_EMAIL
+            else:
+                previous_query = previous_query.filter(Scan.user_id == scan.user_id)
+                user = db.get(User, scan.user_id)
+                recipient = user.email if user else None
+
+            previous_row = previous_query.order_by(Scan.created_at.desc()).first()
+            previous_result = previous_row.results if previous_row else None
+            db.add(ScanResult(scan_id=scan_uuid, results=safe_result))
+            if recipient:
+                alert_payload = {
+                    "job_id": job_id,
+                    "domain": scan.domain,
+                    "source": scan.source,
+                    "recipient": recipient,
+                    "result": safe_result,
+                    "previous_result": previous_result,
+                }
 
         db.commit()
 
+    if alert_payload:
+        _deliver_scan_alert(**alert_payload)
+
     return status
+
 
 class ScanRequest(BaseModel):
     domain: str
+
+
+class MonitorRequest(BaseModel):
+    domain: str
+    cadence: Literal["daily", "weekly"] = "weekly"
 
 
 class TestAlertResponse(BaseModel):
@@ -401,24 +599,13 @@ def scan(
                 domain=domain,
                 status=initial_status,
                 user_id=principal.user_id,
+                source="manual",
             )
         )
 
         db.commit()
 
-    if TASK_QUEUE_MODE == "celery":
-        try:
-            celery_client.send_task("cyberrecon.run_scan", args=[job_id, domain])
-        except Exception as exc:
-            logger.exception("Unable to queue scan %s", job_id)
-            with SessionLocal() as db:
-                scan_row = db.get(Scan, job_uuid)
-                if scan_row is not None:
-                    scan_row.status = "failed"
-                    db.commit()
-            raise HTTPException(status_code=503, detail="Scan queue is unavailable") from exc
-    else:
-        background_tasks.add_task(_run_scan_job, job_id, domain)
+    _dispatch_scan_job(job_id, domain, background_tasks)
 
     return {
         "job_id": job_id,
@@ -491,10 +678,166 @@ def list_scans(principal: Principal = Depends(require_principal)):
                 "job_id": str(s.id),
                 "domain": s.domain,
                 "status": s.status,
+                "source": s.source,
                 "created_at": s.created_at,
             }
             for s in scans
         ]
+
+
+def _monitor_response(monitor: DomainMonitor) -> dict:
+    return {
+        "id": str(monitor.id),
+        "domain": monitor.domain,
+        "cadence": monitor.cadence,
+        "enabled": monitor.enabled,
+        "next_run_at": monitor.next_run_at,
+        "last_run_at": monitor.last_run_at,
+        "created_at": monitor.created_at,
+    }
+
+
+@app.post("/monitors", status_code=201)
+def create_monitor(
+    request: MonitorRequest,
+    principal: Principal = Depends(require_account),
+):
+    domain = normalize_domain(request.domain)
+    validate_public_domain(domain)
+    now = datetime.now(timezone.utc)
+
+    with SessionLocal() as db:
+        monitor_count = (
+            db.query(DomainMonitor)
+            .filter(DomainMonitor.user_id == principal.user_id)
+            .count()
+        )
+        if monitor_count >= MAX_MONITORS_PER_USER:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Each account may monitor up to {MAX_MONITORS_PER_USER} domains",
+            )
+
+        monitor = DomainMonitor(
+            user_id=principal.user_id,
+            domain=domain,
+            cadence=request.cadence,
+            next_run_at=next_monitor_run(request.cadence, now),
+        )
+        db.add(monitor)
+        try:
+            db.commit()
+        except IntegrityError as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="This domain is already monitored by the account",
+            ) from exc
+        db.refresh(monitor)
+        return _monitor_response(monitor)
+
+
+@app.get("/monitors")
+def list_monitors(principal: Principal = Depends(require_account)):
+    with SessionLocal() as db:
+        monitors = (
+            db.query(DomainMonitor)
+            .filter(DomainMonitor.user_id == principal.user_id)
+            .order_by(DomainMonitor.created_at.desc())
+            .all()
+        )
+        return [_monitor_response(monitor) for monitor in monitors]
+
+
+@app.delete("/monitors/{monitor_id}")
+def delete_monitor(
+    monitor_id: uuid.UUID,
+    principal: Principal = Depends(require_account),
+):
+    with SessionLocal() as db:
+        monitor = (
+            db.query(DomainMonitor)
+            .filter(
+                DomainMonitor.id == monitor_id,
+                DomainMonitor.user_id == principal.user_id,
+            )
+            .first()
+        )
+        if monitor is None:
+            raise HTTPException(status_code=404, detail="Monitor not found")
+        db.delete(monitor)
+        db.commit()
+    return {"status": "deleted"}
+
+
+@app.post("/admin/monitoring/run-due")
+def run_due_monitors(
+    background_tasks: BackgroundTasks,
+    http_request: Request,
+    _: Principal = Depends(require_admin),
+):
+    """Atomically claim due monitors and dispatch their scheduled scans."""
+
+    enforce_rate_limit(http_request, scope="scheduled monitoring")
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        due_monitors = (
+            db.query(DomainMonitor)
+            .filter(
+                DomainMonitor.enabled.is_(True),
+                DomainMonitor.next_run_at <= now,
+            )
+            .order_by(DomainMonitor.next_run_at)
+            .with_for_update(skip_locked=True)
+            .limit(MAX_SCHEDULED_SCANS_PER_RUN)
+            .all()
+        )
+        claimed = [
+            (monitor.user_id, monitor.domain, monitor.cadence)
+            for monitor in due_monitors
+        ]
+        for monitor in due_monitors:
+            monitor.last_run_at = now
+            monitor.next_run_at = next_monitor_run(monitor.cadence, now)
+        db.commit()
+
+    scheduled_jobs: list[str] = []
+    skipped_domains: list[str] = []
+    initial_status = "queued" if TASK_QUEUE_MODE == "celery" else "running"
+    for user_id, domain, cadence in claimed:
+        try:
+            validate_public_domain(domain)
+        except HTTPException:
+            logger.warning("Scheduled target no longer resolves safely: %s", domain)
+            skipped_domains.append(domain)
+            continue
+
+        job_uuid = uuid.uuid4()
+        job_id = str(job_uuid)
+        with SessionLocal() as db:
+            db.add(
+                Scan(
+                    id=job_uuid,
+                    domain=domain,
+                    status=initial_status,
+                    user_id=user_id,
+                    source=f"scheduled_{cadence}",
+                )
+            )
+            db.commit()
+
+        try:
+            _dispatch_scan_job(job_id, domain, background_tasks)
+            scheduled_jobs.append(job_id)
+        except HTTPException:
+            skipped_domains.append(domain)
+
+    return {
+        "claimed": len(claimed),
+        "scheduled": len(scheduled_jobs),
+        "job_ids": scheduled_jobs,
+        "skipped_domains": skipped_domains,
+    }
 
 
 @app.get("/admin/scans")
@@ -513,6 +856,7 @@ def list_admin_scans(_: Principal = Depends(require_admin)):
                 "job_id": str(scan_row.id),
                 "domain": scan_row.domain,
                 "status": scan_row.status,
+                "source": scan_row.source,
                 "created_at": scan_row.created_at,
                 "user_email": user.email if user else "administrative scan",
                 "phishing": (result.results or {}).get("phishing") if result else None,

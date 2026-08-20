@@ -1,0 +1,29 @@
+name: Scheduled monitoring
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cyberrecon-scheduled-monitoring
+  cancel-in-progress: false
+
+jobs:
+  run-due-monitors:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger due CyberRecon monitors
+        env:
+          CYBERRECON_API_URL: https://cyberrecon-api-3ams.onrender.com
+          CYBERRECON_SCAN_API_KEY: ${{ secrets.CYBERRECON_SCAN_API_KEY }}
+        run: |
+          test -n "$CYBERRECON_SCAN_API_KEY"
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "X-API-Key: $CYBERRECON_SCAN_API_KEY" \
+            --header "Content-Type: application/json" \
+            "$CYBERRECON_API_URL/admin/monitoring/run-due"
